@@ -50,6 +50,7 @@ from database import (
     db,
     is_message_handled,
     get_config,
+    check_bot_permissions,
 )
 
 _free_col   = db["free_per_group"]
@@ -82,6 +83,10 @@ except Exception as _ai_import_err:
 async def nexus_spam_handler(client: Client, message: Message):
     cid = message.chat.id
     uid = message.from_user.id if message.from_user else None
+
+    # [PATCH]: Menutup mata dari laporan grup jika bot tidak memiliki hak eksekutor.
+    if not await check_bot_permissions(client, cid):
+        return
 
     from database import is_admin
     if not await is_admin(client, cid, uid):
@@ -629,6 +634,10 @@ async def nexus_silent_filter(client: Client, message: Message):
     cid = message.chat.id
     uid = message.from_user.id
     mid = message.id
+
+    # [PATCH]: Menutup mata dan menghemat resource AI jika bot tak punya izin eksekutor.
+    if not await check_bot_permissions(client, cid):
+        return
 
     # ── PINTU BERURUTAN: Cek apakah filter sebelumnya sudah menangani ─────────
     if is_message_handled(cid, mid):
