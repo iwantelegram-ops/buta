@@ -52,6 +52,7 @@ from database import (
     is_admin, delete_queue, get_config,
     db, TZ_WIB,
     mark_message_handled, is_message_handled, insert_group_action_log,
+    check_bot_permissions,
 )
 from core.punishment import check_and_punish
 
@@ -250,6 +251,10 @@ async def bio_filter(client: Client, message: Message):
     if is_message_handled(cid, mid):
         return
 
+    # ── Cek izin bot: HARUS punya delete_messages DAN restrict_members ───────
+    if not await check_bot_permissions(client, cid):
+        return
+
     cfg = await get_config(cid)
 
     # ── Bio Admin Wajib (NewsCore) — dicek SEBELUM skip-admin di bawah,
@@ -359,6 +364,11 @@ async def bio_typing_handler(client: Client, update, users, chats):
             chat_id = int(f"-100{peer.channel_id}")
 
         if not chat_id:
+            return
+
+        # ── PERBAIKAN: Cek izin bot saat user TYPING ─────────────────────────
+        # Jika bot tidak punya hak delete & restrict, langsung tutup mata di sini.
+        if not await check_bot_permissions(client, chat_id):
             return
 
         # Throttle: jangan trigger terlalu sering dari bot utama
