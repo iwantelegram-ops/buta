@@ -366,8 +366,7 @@ async def bio_typing_handler(client: Client, update, users, chats):
         if not chat_id:
             return
 
-        # ── PERBAIKAN: Cek izin bot saat user TYPING ─────────────────────────
-        # Jika bot tidak punya hak delete & restrict, langsung tutup mata di sini.
+        # [PATCH]: Cegah kebocoran resource dengan skip jika tidak ada hak eksekutor.
         if not await check_bot_permissions(client, chat_id):
             return
 
