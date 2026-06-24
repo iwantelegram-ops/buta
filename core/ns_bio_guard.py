@@ -140,7 +140,8 @@ async def enforce_admin_bio(client, chat_id: int, user_id: int, admin_bio_ok) ->
         # mis. sudah di-unadmin oleh proses lain / reset NewsCore terjadi
         # tepat di waktu yang sama)
         ns_admins = await ns_get_current_admins(chat_id)
-        if user_id not in {a["user_id"] for a in ns_admins}:
+        admin_doc = next((a for a in ns_admins if a["user_id"] == user_id), None)
+        if admin_doc is None:
             return
 
         ns_cfg        = await ns_get_config(chat_id)
@@ -151,13 +152,9 @@ async def enforce_admin_bio(client, chat_id: int, user_id: int, admin_bio_ok) ->
         # tereksekusi untuk kasus tersebut. Jadi di titik ini, required_text
         # kosong HANYA berarti "belum pernah diisi sama sekali" (default awal).
 
-        # Ambil nama & info user untuk log
-        user_name = str(user_id)
-        try:
-            u = await client.get_users(user_id)
-            user_name = u.first_name or user_name
-        except Exception:
-            pass
+        # Ambil nama dari dokumen ns_admins yang sudah ada di DB — TIDAK hit API.
+        # Field user_name disimpan saat admin diangkat via ns_set_current_admins().
+        user_name = admin_doc.get("user_name") or str(user_id)
 
         try:
             chat_title = str(chat_id)
