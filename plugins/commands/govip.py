@@ -17,21 +17,30 @@ FLOW DI GRUP:
           (pesan tetap dihapus secara senyap).
 
 FLOW DI DM (deep-link ?start=govip_<chat_id>):
-  Diintersep SEBELUM handler /start umum (plugins/commands/antigcast_group.py)
-  lewat group=-1 + pyrogram.ContinuePropagation — jika payload BUKAN
-  "govip_...", handler ini melempar ke handler /start biasa tanpa
-  mengubah apapun.
+  Diintersep di group=-1 (lebih awal dari handler /start umum di
+  plugins/commands/antigcast_group.py, yang ada di group=0 default).
 
-  Jika payload valid:
-    1. Re-validasi config grup tersebut (jaga-jaga teks VIP sudah
-       dimatikan/dihapus admin setelah tombol dibagikan) — jika sudah
-       tidak aktif, beri tahu user dengan sopan, bukan diam saja
-       (berbeda dari kondisi b di grup, karena di DM user sudah niat
-       klik tombol dan menunggu jawaban).
-    2. Tampilkan tutorial pasang teks VIP bio (font monospace),
-       daftar SEMUA filter/antispam yang akan dilewati di grup itu
-       (di-list satu per satu), dan penjelasan mini + tombol untuk
-       menambahkan bot ke grup lain dengan kuasa admin penuh.
+  Untuk payload "govip_..." (valid maupun tidak), KEDUA balasan tetap
+  dikirim, urut:
+    1. Balasan /start biasa (page_start) dikirim LEBIH DULU — supaya
+       panel utama tetap terbaca/diketahui user, sama seperti /start
+       tanpa payload.
+    2. Balasan tutorial VIP (atau pesan error bila link/grup tidak
+       valid) dikirim SETELAHNYA, sebagai pesan terpisah di bawah.
+  Handler ini TIDAK melempar ke handler /start lama via
+  ContinuePropagation untuk kasus govip — page_start dipanggil
+  langsung di sini agar urutan kirim bisa dipastikan (start dulu,
+  govip menyusul), tanpa mengirim balasan start dua kali.
+
+  Untuk /start TANPA payload govip (termasuk /start biasa & /antigcast):
+  handler ini hanya meneruskan (ContinuePropagation) ke handler lama
+  tanpa perubahan apapun — perilaku /start lama 100% tidak berubah.
+
+  Jika payload govip valid (grup ditemukan & VIP Bio masih aktif):
+    Tampilkan tutorial pasang teks VIP bio (font monospace),
+    daftar SEMUA filter/antispam yang akan dilewati di grup itu
+    (di-list satu per satu), dan penjelasan mini + tombol untuk
+    menambahkan bot ke grup lain dengan kuasa admin penuh.
 """
 
 import time
@@ -54,6 +63,14 @@ _FULL_ADMIN_RIGHTS = (
     "change_info+delete_messages+restrict_members+invite_users"
     "+pin_messages+manage_chat+manage_video_chats+promote_members"
 )
+
+
+# Cooldown DM sendiri khusus payload /start govip_... — independen dari
+# cooldown /start biasa milik antigcast_group.py (variabel privat modul itu,
+# tidak diimpor di sini agar tidak menyentuh file tersebut). Mencegah user
+# membuka link govip berkali-kali secara beruntun.
+_govip_dm_cooldown: dict[int, float] = {}
+_GOVIP_DM_CD_SECS = 10   # detik
 
 
 def _vip_bio_active(cfg: dict) -> bool:
@@ -137,14 +154,49 @@ async def cmd_govip(client: Client, message: Message):
 async def govip_start_intercept(client: Client, message: Message):
     if len(message.command) < 2 or not message.command[1].startswith("govip_"):
         # Bukan deep-link /govip → lempar ke handler /start umum
-        # (plugins/commands/antigcast_group.py), tidak diproses di sini.
+        # (plugins/commands/antigcast_group.py), tidak diproses di sini,
+        # perilaku /start lama 100% tidak berubah.
         raise ContinuePropagation
 
+    uid = message.from_user.id if message.from_user else None
+
+    # ── Cooldown DM sendiri untuk payload govip — anti-spam buka link ──────
+    now = time.monotonic()
+    if uid is not None:
+        last = _govip_dm_cooldown.get(uid, 0.0)
+        if now - last < _GOVIP_DM_CD_SECS:
+            return   # masih cooldown → abaikan diam-diam, tidak kirim apapun
+        _govip_dm_cooldown[uid] = now
+
+    # ── 1. Balasan /start BIASA dikirim LEBIH DULU ──────────────────────────
+    # Dipanggil langsung (bukan via ContinuePropagation) supaya urutan kirim
+    # terjamin: start dulu, govip menyusul di bawahnya — tanpa risiko
+    # balasan start terkirim dua kali.
+    try:
+        from plugins.ui.pages import page_start
+        start_text, start_keyboard = await page_start(client)
+        await message.reply(
+            start_text,
+            reply_markup=start_keyboard,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        print(f"[GoVIP] Gagal kirim balasan start: {e}")
+
+    # ── 2. Balasan tutorial VIP (atau error) dikirim SETELAHNYA ─────────────
     raw_cid = message.command[1][len("govip_"):]
     try:
         cid = int(raw_cid.replace("n", "-", 1)) if raw_cid.startswith("n") else int(raw_cid)
     except ValueError:
-        raise ContinuePropagation
+        # Payload govip_... tapi chat_id-nya rusak (link basi/diedit manual).
+        await message.reply(
+            "⚠️ <b>Link tidak valid.</b>\n\n"
+            "Coba tekan ulang tombol <b>⭐ Jadi VIP Member</b> dari grup, "
+            "jangan kirim link secara manual.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
 
     cfg = await get_config(cid)
     if not _vip_bio_active(cfg):
