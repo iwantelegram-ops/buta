@@ -807,6 +807,13 @@ async def main():
         except Exception as e:
             print(f"[Startup] ⚠️  newscore_checker_loop gagal dimulai: {e}")
 
+        # ── VIP Bio Checker Loop (auto-keluar VIP saat teks hilang dari bio) ──
+        try:
+            from core.vip_bio_guard import vip_bio_checker_loop
+            asyncio.create_task(vip_bio_checker_loop())
+        except Exception as e:
+            print(f"[Startup] ⚠️  vip_bio_checker_loop gagal dimulai: {e}")
+
         # ── NewsCore Score Buffer Flush Worker ────────────────────────────────
         # Flush skor yang di-buffer di memory ke MongoDB secara batch,
         # setiap NS_FLUSH_INTERVAL detik (default 10 detik).
