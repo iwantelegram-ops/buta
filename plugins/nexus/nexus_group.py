@@ -932,7 +932,7 @@ async def nexus_silent_filter(client: Client, message: Message):
 async def nexus_tracking_grup(client: Client, update: ChatMemberUpdated):
     try:
         from pyrogram.enums import ChatType
-        me = await client.get_me()
+        me = client.me #await client.get_me()
         if not update.new_chat_member or update.new_chat_member.user.id != me.id:
             return
 
