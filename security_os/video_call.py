@@ -3538,6 +3538,14 @@ async def security_os_enable(chat_id: int) -> None:
     for k in keys_to_del:
         _bio_cache.pop(k, None)
 
+    # Invalidasi cache _any_bio_feature_active agar typing handler tahu
+    # Security OS sekarang aktif → prefetch bio kembali berjalan
+    try:
+        from plugins.filters.bio import _invalidate_bio_feature_cache
+        _invalidate_bio_feature_cache(chat_id)
+    except Exception:
+        pass
+
     if userbot and _ub_ready:
         _safe_task(_enable_secos_for_group(chat_id), tag=f"enable-secos-{chat_id}")
 
@@ -3591,6 +3599,14 @@ async def security_os_disable(chat_id: int) -> None:
     # ── Paksa userbot turun dari VC via worker (antri — tidak langsung) ──────
     if userbot and _ub_ready:
         _enqueue_vc_leave(chat_id)
+
+    # Invalidasi cache _any_bio_feature_active agar typing handler tahu
+    # Security OS sekarang nonaktif → prefetch bio menyesuaikan
+    try:
+        from plugins.filters.bio import _invalidate_bio_feature_cache
+        _invalidate_bio_feature_cache(chat_id)
+    except Exception:
+        pass
 
     # ── Bot pemantau TIDAK dimatikan — selalu standby (bio.py juga memakainya)
     print(f"[SecOS] Security OS dinonaktifkan grup {chat_id} — bot pemantau tetap aktif.")
