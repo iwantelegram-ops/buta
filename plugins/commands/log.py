@@ -181,7 +181,7 @@ def _user_line(uid: int, name: str) -> str:
 async def log_new_group(client: Client, message: Message):
     if not message.new_chat_members or not LOG_CHANNEL:
         return
-    me = await client.get_me()
+    me = client.me #await client.get_me()
     for member in message.new_chat_members:
         if member.id == me.id:
             chat  = message.chat
