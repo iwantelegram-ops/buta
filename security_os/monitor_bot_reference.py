@@ -149,7 +149,11 @@ TZ_WIB = timezone(timedelta(hours=7))
 # pemindahan.
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from database import db, _init_backend, get_bot_config, save_bot_config, get_active_backend  # noqa: E402
+from database import (  # noqa: E402
+    db, _init_backend, get_bot_config, save_bot_config, get_active_backend,
+    mention_cache_set, mention_cache_get_by_uid, mention_cache_get_by_username,
+    mention_cache_refresh_ttl, mention_cache_remove_member,
+)
 
 bio_col = db["bio_profiles"]   # Collection hasil scan — dibaca bot utama & userbot
 sec_col = db["security_os"]    # Untuk ambil daftar grup + token
@@ -738,6 +742,76 @@ class MonitorInstance:
             doc = None
         return doc.get("has_link", False) if doc else None
 
+    async def check_is_member(self, target: "int | str") -> "bool | None":
+        """
+        Cek apakah user adalah member grup ini via bot pembantu.
+
+        target bisa:
+          - int  → user_id (dari TEXT_MENTION / tg://user?id=)
+          - str  → username tanpa @ (dari @mention biasa)
+
+        Alur:
+          1. Cek mention_member_cache dulu (DB lokal, tidak hit Telegram)
+          2. Cache hit  → return langsung + refresh TTL
+          3. Cache miss → panggil get_chat_member via client bot pembantu
+          4. Simpan hasilnya ke cache
+          5. Return True (member) / False (bukan member) / None (error)
+
+        FloodWait ditangkap dan return None → caller fallback ke bot utama.
+        """
+        from pyrogram.errors import UserNotParticipant, PeerIdInvalid, RPCError
+
+        # ── 1. Cek cache by user_id ─────────────────────────────────────────
+        if isinstance(target, int):
+            cached = await mention_cache_get_by_uid(self.chat_id, target)
+            if cached is not None:
+                # Hit — perbarui TTL supaya entry tidak expire jika masih aktif
+                asyncio.create_task(mention_cache_refresh_ttl(self.chat_id, target))
+                return cached
+
+        # ── 2. Cek cache by username ────────────────────────────────────────
+        elif isinstance(target, str):
+            cached = await mention_cache_get_by_username(self.chat_id, target)
+            if cached is not None:
+                asyncio.create_task(mention_cache_refresh_ttl(self.chat_id, target) if False else
+                                    asyncio.sleep(0))   # placeholder — refresh by uid dilakukan setelah resolve
+                return cached
+
+        # ── 3. Cache miss → tanya Telegram via bot pembantu ─────────────────
+        try:
+            member = await self.client.get_chat_member(self.chat_id, target)
+            # Anggota aktif, restricted, dsb = masih member
+            is_member = member is not None
+            # Ambil info user_id dan username dari hasil
+            user_id  = member.user.id       if (member and member.user) else (target if isinstance(target, int) else None)
+            username = member.user.username if (member and member.user) else (target if isinstance(target, str) else None)
+            # Simpan ke cache
+            if user_id:
+                await mention_cache_set(
+                    self.chat_id, user_id, is_member,
+                    username=username,
+                )
+            return is_member
+
+        except (UserNotParticipant, PeerIdInvalid):
+            # Bukan member atau user tidak ada
+            user_id  = target if isinstance(target, int) else None
+            username = target if isinstance(target, str) else None
+            if user_id:
+                await mention_cache_set(self.chat_id, user_id, False, username=username)
+            return False
+
+        except FloodWait as fw:
+            print(
+                f"[Monitor {self.chat_id}] check_is_member FloodWait "
+                f"{fw.value}s target={target} — skip, fallback ke bot utama"
+            )
+            return None   # None = sinyal fallback ke bot utama
+
+        except Exception as e:
+            print(f"[Monitor {self.chat_id}] check_is_member error target={target}: {e}")
+            return None   # None = sinyal fallback ke bot utama
+
     def _register_handlers(self) -> None:
         """Daftarkan handler Pyrogram ke client instance ini."""
         chat_id = self.chat_id
@@ -756,7 +830,7 @@ class MonitorInstance:
             # Cek throttle — hanya enqueue jika cache expired
             await monitor.check_and_save(user.id, force=False)
 
-        # ── User JOIN grup → cek bio (force, sekali per join) ─────────────────
+        # ── User JOIN/LEAVE grup → update mention cache + cek bio ──────────
         @self.client.on_chat_member_updated()
         async def _on_join(client: Client, upd: ChatMemberUpdated):
             if upd.chat.id != chat_id:
@@ -766,9 +840,27 @@ class MonitorInstance:
             user = upd.new_chat_member.user
             if user is None or user.is_bot:
                 return
+
+            from pyrogram.enums import ChatMemberStatus
+            new_status = upd.new_chat_member.status
+
+            # Member KELUAR / KICK / BAN → tandai is_member=False di cache
+            if new_status in (
+                ChatMemberStatus.LEFT,
+                ChatMemberStatus.BANNED,
+                ChatMemberStatus.RESTRICTED,
+            ):
+                await mention_cache_remove_member(chat_id, user.id)
+                return
+
+            # Member JOIN / REJOIN → tandai is_member=True di cache + cek bio
+            await mention_cache_set(
+                chat_id, user.id, True,
+                username=user.username,
+            )
             print(
                 f"[Monitor {chat_id}] User {user.id} join "
-                "→ cek bio (force)"
+                "→ update mention cache + cek bio (force)"
             )
             await monitor.check_and_save(user.id, force=True)
 
@@ -1013,7 +1105,30 @@ async def query_bio(chat_id: int, user_id: int) -> bool | None:
     return doc.get("has_link", False)
 
 
-async def query_admin_bio_ok(chat_id: int, user_id: int) -> bool | None:
+async def check_member_via_monitor(chat_id: int, target: "int | str") -> "bool | None":
+    """
+    Cek apakah user adalah member grup via bot pembantu (MonitorInstance).
+
+    Dipanggil oleh antispam_queue._is_external_mention() sebagai pengganti
+    langsung client.get_chat_member() dari bot utama.
+
+    target:
+      - int  → user_id (dari TEXT_MENTION / tg://user?id=)
+      - str  → username tanpa @ (dari @mention biasa)
+
+    Return:
+      True  → user adalah member grup ini
+      False → user bukan member (external mention)
+      None  → MonitorInstance tidak aktif atau error (fallback ke bot utama)
+    """
+    instance = _active_instances.get(chat_id)
+    if instance is None:
+        return None   # tidak ada bot pembantu → fallback ke bot utama
+    try:
+        return await instance.check_is_member(target)
+    except Exception as e:
+        print(f"[MonitorQuery] check_member_via_monitor chat={chat_id} target={target}: {e}")
+        return None
     """
     Baca hasil cek "Bio Admin Wajib" (NewsCore) dari DB untuk pasangan
     (chat_id, user_id). Ditulis bersamaan dengan has_link oleh
