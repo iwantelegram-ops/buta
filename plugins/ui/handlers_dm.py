@@ -332,6 +332,7 @@ async def cb_manage(client, cb: CallbackQuery):
             "Berikan kedua izin itu agar bot bisa bekerja di grup ini.",
             show_alert=True,
         )
+        return
     else:
         await cb.answer()
 
