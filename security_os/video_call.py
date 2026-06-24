@@ -495,6 +495,56 @@ _vc_scanning_groups: set[int] = set()   # {chat_id} yang sedang aktif di-scan
 _admin_cache: dict[int, tuple[set[int], float]] = {}   # {chat_id: (admin_ids, ts)}
 _ADMIN_CACHE_TTL = 300.0   # 5 menit — refresh admin list tiap 5 menit
 
+# ── Cache izin userbot "Kelola Obrolan Video" per chat_id (TTL 5 menit) ──────
+# phone.EditGroupCallParticipant (mute mic VC) WAJIB userbot punya privilege
+# can_manage_video_chats di grup tersebut. Jika tidak ada → userbot HARUS
+# skip total deteksi/aksi Security OS VC untuk grup itu (bukan cuma gagal
+# diam-diam saat eksekusi mute) — sama prinsipnya dengan check_bot_permissions
+# di bot utama (antispam.py dkk).
+_vc_perm_cache: dict[int, tuple[bool, float]] = {}   # {chat_id: (has_perm, ts)}
+_VC_PERM_CACHE_TTL = 300.0   # 5 menit — sinkron dengan _ADMIN_CACHE_TTL
+
+
+async def _check_vc_manage_permission(chat_id: int) -> bool:
+    """
+    True jika userbot punya privilege can_manage_video_chats di grup chat_id.
+
+    Tanpa privilege ini, phone.EditGroupCallParticipant (mute mic) akan
+    selalu gagal di Telegram — jadi seluruh pipeline deteksi (cek member,
+    cek bio, query bot pemantau) untuk grup ini harus di-skip sepenuhnya,
+    bukan hanya gagal senyap di langkah mute terakhir.
+
+    Cache 5 menit per grup. Gagal query (error jaringan dll.) → fail-open
+    (return True) agar userbot tidak tiba-tiba berhenti total di semua
+    grup hanya karena Telegram sedang lambat/error sesaat.
+    """
+    cached = _vc_perm_cache.get(chat_id)
+    if cached:
+        has_perm, ts = cached
+        if time.monotonic() - ts < _VC_PERM_CACHE_TTL:
+            return has_perm
+
+    if not userbot:
+        return False
+
+    try:
+        me     = await userbot.get_me()
+        member = await userbot.get_chat_member(chat_id, me.id)
+        privs  = getattr(member, "privileges", None)
+        has_perm = bool(getattr(privs, "can_manage_video_chats", False)) if privs else False
+    except Exception as e:
+        print(f"[UB-VC] Gagal cek izin manage_video_chats grup={chat_id}: {e} — anggap OK (fail-open)")
+        has_perm = True  # fail-open: jangan block userbot saat Telegram error
+
+    _vc_perm_cache[chat_id] = (has_perm, time.monotonic())
+    return has_perm
+
+
+def _invalidate_vc_perm_cache(chat_id: int) -> None:
+    """Hapus cache izin userbot untuk grup ini (mis. setelah re-promote)."""
+    _vc_perm_cache.pop(chat_id, None)
+
+
 # ── Cache bio per user per grup (dua lapis) ──────────────────────────────────
 # Lapisan 1 (di sini, video_call.py): cache in-memory userbot, TTL 60 detik.
 #   → Setelah 60 detik, saat user naik VC lagi → trigger force_check_vc_join().
@@ -1551,6 +1601,12 @@ async def _voice_chat_monitor_loop() -> None:
         if not sec_doc.get("enabled"):
             return
 
+        # ── Cek izin userbot: HARUS punya can_manage_video_chats ──────────────
+        # Tanpa ini, mute mic akan selalu gagal di Telegram. Skip grup ini
+        # sepenuhnya — jangan cek admin list, jangan scan peserta sama sekali.
+        if not await _check_vc_manage_permission(chat_id):
+            return
+
         # ARSITEKTUR DB-DRIVEN: monitor_bot_id tidak wajib untuk query bio.
         # Userbot langsung baca collection bio_profiles yang diisi bot pemantau.
         # Catatan: Security OS tetap membutuhkan bot pemantau untuk mengisi DB,
@@ -1776,6 +1832,13 @@ async def _vc_scan_and_enforce_impl(chat_id: int) -> None:
     if not sec_doc.get("enabled"):
         return
     monitor_id = sec_doc.get("monitor_bot_id", 0)
+
+    # ── Cek izin userbot: HARUS punya can_manage_video_chats ──────────────────
+    # Tanpa ini, mute mic di VC akan selalu gagal di Telegram. Skip grup ini
+    # sepenuhnya — jangan join VC, jangan scan peserta sama sekali.
+    if not await _check_vc_manage_permission(chat_id):
+        print(f"[UB-VC-Sched] Grup {chat_id}: userbot tidak punya izin Kelola Obrolan Video — skip siklus ini.")
+        return
 
     print(f"[UB-VC-Sched] Grup {chat_id}: mulai siklus scan VC...")
 
@@ -2176,6 +2239,14 @@ async def _query_monitor_then_kick(
       Jika admin lain yang mute (muted_by_you=False AND DB miss) → tidak di-unmute.
     """
     try:
+        # ── Cek izin userbot: HARUS punya can_manage_video_chats ──────────────
+        # Tanpa ini, mute mic akan selalu gagal di Telegram. Skip grup ini
+        # sepenuhnya — tidak cek VIP, tidak cek member, tidak cek bio sama
+        # sekali (bukan cuma gagal senyap saat eksekusi mute di akhir).
+        if not await _check_vc_manage_permission(chat_id):
+            _processing_kick.discard((chat_id, user_id))
+            return
+
         # ── VIP Guard: cek paling awal — sebelum non-member dan bio check ─────
         # User VIP (free_per_group) bebas dari aturan mute Security OS.
         # TAPI: jika VIP sedang/pernah di-mute oleh userbot (vc_muted_by_ub)
