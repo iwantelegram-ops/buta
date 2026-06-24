@@ -113,31 +113,109 @@ def invalidate_local_regex_cache(chat_id: int) -> None:
 
 
 async def _is_external_mention(client: Client, message) -> bool:
+    """
+    Deteksi apakah pesan mengandung mention ke user yang BUKAN member grup.
+
+    Urutan prioritas per mention:
+      1. Cek mention_member_cache (DB lokal) → O(1) tanpa Telegram API
+      2. Cache hit  → langsung return
+      3. Cache miss → delegate ke bot pembantu (MonitorInstance) via check_member_via_monitor
+      4. Monitor tidak aktif / error → fallback ke bot utama (get_chat_member langsung)
+
+    TTL cache 1 minggu, diperbarui setiap ada mention yang cache hit.
+    username dan user_id keduanya disimpan secara terpisah di cache.
+    """
     if not message.entities:
         return False
     content = message.text or message.caption or ""
     cid = message.chat.id
+
+    try:
+        from monitor_bot_reference import check_member_via_monitor
+        _monitor_available = True
+    except Exception:
+        _monitor_available = False
+
     for entity in message.entities:
         target = None
+        target_uid: int | None = None
+        target_uname: str | None = None
+
         if entity.type == MessageEntityType.MENTION:
-            target = content[entity.offset:entity.offset + entity.length].lstrip("@").lower()
+            uname = content[entity.offset:entity.offset + entity.length].lstrip("@").lower()
+            target = uname
+            target_uname = uname
         elif entity.type == MessageEntityType.TEXT_MENTION and getattr(entity, "user", None):
             target = entity.user.id
+            target_uid = entity.user.id
         elif entity.type in (MessageEntityType.URL, MessageEntityType.TEXT_LINK):
             url = (content[entity.offset:entity.offset + entity.length]
                    if entity.type == MessageEntityType.URL else entity.url)
             if url.startswith("tg://user?id="):
                 try:
                     target = int(url.split("=")[1])
+                    target_uid = target
                 except Exception:
                     pass
-        if target:
-            if isinstance(target, str) and target in ["botfather", "telegram"]:
+
+        if not target:
+            continue
+        if isinstance(target, str) and target in ("botfather", "telegram"):
+            continue
+
+        # ── 1. Cek cache dulu ───────────────────────────────────────────────
+        from database import (
+            mention_cache_get_by_uid, mention_cache_get_by_username,
+            mention_cache_refresh_ttl,
+        )
+        cached = None
+        if target_uid:
+            cached = await mention_cache_get_by_uid(cid, target_uid)
+            if cached is not None:
+                asyncio.create_task(mention_cache_refresh_ttl(cid, target_uid))
+                if not cached:   # is_member=False → external
+                    return True
+                continue         # is_member=True → lanjut entity berikutnya
+        elif target_uname:
+            cached = await mention_cache_get_by_username(cid, target_uname)
+            if cached is not None:
+                # Tidak punya user_id di sini, skip refresh TTL (monitor nanti update)
+                if not cached:
+                    return True
                 continue
+
+        # ── 2. Cache miss → coba bot pembantu ──────────────────────────────
+        if _monitor_available:
             try:
-                await client.get_chat_member(cid, target)
-            except (UserNotParticipant, PeerIdInvalid, RPCError):
+                result = await check_member_via_monitor(cid, target)
+                if result is not None:
+                    # Monitor berhasil → tidak perlu hit bot utama
+                    if not result:
+                        return True   # external
+                    continue          # member, lanjut
+                # result=None → monitor tidak aktif / error → fallback ke bot utama
+            except Exception:
+                pass
+
+        # ── 3. Fallback: bot utama langsung ────────────────────────────────
+        try:
+            member = await client.get_chat_member(cid, target)
+            is_member = member is not None
+            # Simpan ke cache untuk mention berikutnya
+            uid = member.user.id if (member and member.user) else (target_uid)
+            uname = member.user.username if (member and member.user) else target_uname
+            if uid:
+                from database import mention_cache_set
+                asyncio.create_task(mention_cache_set(cid, uid, is_member, username=uname))
+            if not is_member:
                 return True
+        except (UserNotParticipant, PeerIdInvalid, RPCError):
+            # Simpan ke cache: bukan member
+            if target_uid:
+                from database import mention_cache_set
+                asyncio.create_task(mention_cache_set(cid, target_uid, False, username=target_uname))
+            return True
+
     return False
 
 
