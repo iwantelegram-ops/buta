@@ -1469,7 +1469,7 @@ async def check_bot_permissions(client, chat_id: int) -> bool:
             return has_perms
 
     try:
-        me     = await client.get_me()
+        me     = client.me #await client.get_me()
         member = await client.get_chat_member(chat_id, me.id)
         privs  = getattr(member, "privileges", None)
         if privs is None:
@@ -1848,7 +1848,7 @@ async def get_my_admin_groups(client, user_id: int) -> list:
                     UserNotParticipant, ChannelPrivate, ChatForbidden,
                     ChatIdInvalid, PeerIdInvalid,
                 )
-                me = await client.get_me()
+                me = client.me #await client.get_me()
                 await client.get_chat_member(chat_id, me.id)
                 # Berhasil → bot masih di grup, lanjutkan
             except Exception as _ve:
