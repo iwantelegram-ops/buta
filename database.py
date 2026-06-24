@@ -1434,6 +1434,61 @@ def invalidate_nexus_counts() -> None:
     _nexus_owner_regex_count_cache  = None
     _nexus_grup_cache               = None
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BOT PERMISSIONS CACHE
+# Cek apakah bot punya can_delete_messages DAN can_restrict_members di sebuah
+# grup. Cache 5 menit per grup agar tidak terus-terus hit Telegram API.
+# Dipakai oleh antispam.py, antispam_queue.py, dan panel DM (handlers_dm.py).
+# ══════════════════════════════════════════════════════════════════════════════
+
+_bot_perm_cache: dict[int, tuple[bool, float]] = {}
+_BOT_PERM_CACHE_TTL = 300  # 5 menit — cukup sering refresh, tidak terlalu boros API
+
+
+async def check_bot_permissions(client, chat_id: int) -> bool:
+    """
+    Kembalikan True jika bot punya KEDUA izin di grup chat_id:
+      • can_delete_messages  — wajib untuk hapus pesan spam
+      • can_restrict_members — wajib untuk ban/mute/restrict user
+
+    Jika salah satu tidak ada → False → bot harus skip grup ini sepenuhnya.
+
+    Cache 5 menit per grup. Saat gagal query ke Telegram (error jaringan, dll.)
+    → fail-open (return True) agar bot tidak tiba-tiba berhenti di semua grup
+    hanya karena Telegram sedang lambat.
+    """
+    now = _time_module.monotonic()
+    cached = _bot_perm_cache.get(chat_id)
+    if cached:
+        has_perms, ts = cached
+        if now - ts < _BOT_PERM_CACHE_TTL:
+            return has_perms
+
+    try:
+        me     = await client.get_me()
+        member = await client.get_chat_member(chat_id, me.id)
+        privs  = getattr(member, "privileges", None)
+        if privs is None:
+            # Bot tidak punya privileges objek → bukan admin
+            has_perms = False
+        else:
+            can_del      = getattr(privs, "can_delete_messages",  False) or False
+            can_restrict = getattr(privs, "can_restrict_members", False) or False
+            has_perms    = bool(can_del and can_restrict)
+    except Exception as e:
+        print(f"[BotPerm] Gagal cek izin chat={chat_id}: {e} — anggap OK (fail-open)")
+        has_perms = True  # fail-open: jangan block bot saat Telegram error
+
+    _bot_perm_cache[chat_id] = (has_perms, now)
+    return has_perms
+
+
+def invalidate_bot_perm_cache(chat_id: int) -> None:
+    """Hapus cache izin bot untuk grup ini (misalnya setelah bot di-promote ulang)."""
+    _bot_perm_cache.pop(chat_id, None)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ADMIN CACHE
 # ══════════════════════════════════════════════════════════════════════════════
