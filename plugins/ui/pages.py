@@ -839,10 +839,9 @@ def _fmt_ts(ts: float) -> str:
 async def page_group_log(chat_id: int, page: int = 1):
     """
     Return (text_html, keyboard).
-    FIXED: Menggunakan HTML biasa dengan <blockquote> standar.
-    Tidak ada lagi marker [BQ] — tidak perlu edit_with_bq (yang crash karena collapsed=True).
+    Desain seragam: tiap entri tampilkan aksi, alasan detail, user, konten.
     """
-    PER_PAGE = 10
+    PER_PAGE = 8
     docs, total = await get_group_action_log_page(chat_id, page, PER_PAGE)
 
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
@@ -850,49 +849,88 @@ async def page_group_log(chat_id: int, page: int = 1):
 
     if not docs:
         text = (
-            "📋 <b>LOG AKTIVITAS</b>\n"
+            "<b>❖ LOG AKTIVITAS GRUP ❖</b>\n"
             f"<code>Grup: {chat_id}</code>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "📭 <b>Belum ada aktivitas tercatat.</b>\n\n"
-            "Log muncul saat bot menghapus pesan, mute, atau ban user.\n"
-            "<i>Log tersimpan selama 7 hari.</i>"
+            "Log muncul otomatis saat bot menghapus pesan,\n"
+            "mute, atau ban user di grup ini.\n"
+            "<i>Riwayat tersimpan 7 hari.</i>"
         )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙  Kembali ke Panel Grup", callback_data=f"manage_{chat_id}")],
         ])
         return text, keyboard
 
-    _ICON = {"HAPUS": "🗑", "MUTE": "🔇", "BAN": "⛔", "KICK-VC": "🎤", "SECOS": "🔐",
-             "MUTE-VC-MIC": "🔇", "UNMUTE-VC-MIC": "🔊"}
+    # ── Peta ikon + label per jenis aksi ─────────────────────────────────────
+    _AKSI_META = {
+        "HAPUS":        ("🗑", "Pesan Dihapus"),
+        "MUTE":         ("🔇", "User Di-Mute"),
+        "BAN":          ("⛔", "User Di-Ban"),
+        "KICK-VC":      ("🎤", "Kick dari Voice Chat"),
+        "SECOS":        ("🔐", "Security OS"),
+        "MUTE-VC-MIC":  ("🎙", "Mic Di-Mute"),
+        "UNMUTE-VC-MIC":("🔊", "Mic Dibuka"),
+    }
+
+    # ── Ikon alasan spesifik berdasarkan teks alasan ─────────────────────────
+    def _alasan_icon(alasan: str) -> str:
+        a = alasan.lower()
+        if "regex global" in a or "filter kata global" in a or "filter global" in a:
+            return "🚫"
+        if "regex grup" in a or "filter kata grup" in a or "filter lokal" in a or "filter kata" in a:
+            return "🔡"
+        if "duplik" in a or "lokal" in a:
+            return "🔁"
+        if "gcast" in a or "broadcast" in a or "global" in a:
+            return "🌐"
+        if "bio" in a:
+            return "🔍"
+        if "link" in a or "url" in a or "tautan" in a:
+            return "🔗"
+        if "mention" in a:
+            return "👤"
+        if "mute" in a and "hapus" in a:
+            return "🔇"
+        if "nexus" in a or "ai" in a:
+            return "🤖"
+        if "cas" in a:
+            return "🚫"
+        return "⚠️"
 
     entries = []
     for d in docs:
-        icon   = _ICON.get(d.get("aksi", ""), "▸")
-        aksi   = d.get("aksi", "?")
-        alasan = d.get("alasan", "—")
-        nama   = d.get("user_name", "?")
-        uid    = d.get("user_id", "?")
-        ts_str = _fmt_ts(d.get("ts", 0))
-        konten = d.get("konten", "").strip()
+        aksi_raw  = d.get("aksi", "?")
+        alasan    = d.get("alasan", "—")
+        nama      = d.get("user_name", "?")
+        uid_val   = d.get("user_id", "?")
+        ts_str    = _fmt_ts(d.get("ts", 0))
+        konten    = d.get("konten", "").strip()
 
-        inner = f"👤 {nama} ({uid})\n📌 {alasan}"
-        if konten:
-            inner += f"\n📨 {konten[:80]}"
+        aksi_icon, aksi_label = _AKSI_META.get(aksi_raw, ("▸", aksi_raw))
+        alasan_icon = _alasan_icon(alasan)
+
+        # Baris konten (potong agar panel tidak penuh)
+        konten_line = f"\n📨 <code>{konten[:70]}{'…' if len(konten) > 70 else ''}</code>" if konten else ""
 
         entry = (
-            f"{icon} <b>{aksi}</b> · {ts_str}\n"
-            f"<blockquote>{inner}</blockquote>"
+            f"{aksi_icon} <b>{aksi_label}</b>  <i>{ts_str}</i>\n"
+            f"<blockquote>"
+            f"👤 {nama} (<code>{uid_val}</code>)\n"
+            f"{alasan_icon} {alasan}"
+            f"{konten_line}"
+            f"</blockquote>"
         )
         entries.append(entry)
 
     body = "\n\n".join(entries)
 
     text = (
-        "📋 <b>LOG AKTIVITAS</b>\n"
+        "<b>❖ LOG AKTIVITAS GRUP ❖</b>\n"
         f"<code>Grup: {chat_id}  ·  Hal {page}/{total_pages}</code>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{body}\n\n"
-        f"<i>Menampilkan {len(docs)} dari {total} log (7 hari terakhir).</i>"
+        f"<i>{len(docs)} dari {total} log · Riwayat 7 hari.</i>"
     )
 
     nav = []
