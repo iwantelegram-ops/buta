@@ -378,6 +378,13 @@ async def bio_typing_handler(client: Client, update, users, chats):
         # member di bawah, karena ini soal kewajiban admin, bukan filter link.
         asyncio.create_task(_check_ns_admin_bio(client, chat_id, user_id))
 
+        # ── Cek izin bot: HARUS punya delete_messages DAN restrict_members ───
+        # Khusus untuk jalur filter link-di-bio (hapus pesan). Jika tidak ada
+        # → skip grup ini sepenuhnya untuk jalur ini (tidak query config/VIP/
+        # bio sama sekali, tidak trigger force_check_user).
+        if not await check_bot_permissions(client, chat_id):
+            return
+
         # Cek konfigurasi bio_check aktif di grup ini
         try:
             cfg = await get_config(chat_id)

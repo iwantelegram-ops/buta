@@ -29,6 +29,7 @@ from database import (
     db, auto_delete_reply, is_admin, delete_queue,
     update_config, save_group_title, save_group_username, remove_group_data,
     TZ_WIB, mark_message_handled, insert_group_action_log, get_config,
+    check_bot_permissions, invalidate_bot_perm_cache,
 )
 from core.group_notify import send_group_notice
 from core.moderation_queue import queue_ban
@@ -142,6 +143,11 @@ async def cas_auto_mod(client: Client, message: Message):
     uid     = message.from_user.id
     cid     = message.chat.id
     mid     = message.id
+
+    # ── Cek izin bot: HARUS punya delete_messages DAN restrict_members ───────
+    # Jika salah satu tidak ada → skip grup ini sepenuhnya (tidak inspect sama sekali).
+    if not await check_bot_permissions(client, cid):
+        return
 
     cfg = await get_config(cid)
     if not cfg.get("cas", False):
@@ -304,6 +310,11 @@ async def handle_bot_status_change(client: Client, update):
         from pyrogram.enums import ChatMemberStatus
         new_status = update.new_chat_member.status
         chat_id    = update.chat.id
+
+        # Status/izin bot berubah (di-promote, di-demote, izin diubah, dll.)
+        # → cache check_bot_permissions basi, hapus agar grup ini langsung
+        # dicek ulang pada pesan berikutnya (tidak menunggu TTL 5 menit).
+        invalidate_bot_perm_cache(chat_id)
 
         if new_status in (ChatMemberStatus.BANNED, ChatMemberStatus.LEFT):
             await remove_group_data(chat_id)
