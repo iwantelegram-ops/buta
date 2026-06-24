@@ -46,7 +46,7 @@ async def cmd_vip(client: Client, message: Message):
 
     await free_col.update_one(
         {"user_id": target, "chat_id": cid},
-        {"$set": {"user_id": target, "chat_id": cid}},
+        {"$set": {"user_id": target, "chat_id": cid, "source": "manual"}},
         upsert=True,
     )
     # Invalidasi cache VIP agar /unmutemic langsung mengenali status VIP baru,
