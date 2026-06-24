@@ -457,6 +457,8 @@ async def page_manage(chat_id: int):
         f"<i>   Filter user yang menyimpan link di bio profil.</i>\n\n"
         f"{icon('anti_mention')} <b>Anti Mention Non-Member</b>  —  <code>{flag('anti_mention')}</code>\n"
         f"<i>   Hapus pesan yang mention user di luar grup.</i>\n\n"
+        f"{icon('anti_link')} <b>Anti Link (URL Detector)</b>  —  <code>{flag('anti_link')}</code>\n"
+        f"<i>   Hapus pesan yang mengandung URL/tautan aktif.</i>\n\n"
         f"{icon('cas')} <b>CAS Anti-Spam Global</b>  —  <code>{flag('cas')}</code>\n"
         f"<i>   Auto-ban user di database 200.000+ spammer terverifikasi.</i>\n\n"
         f"⏱️ <b>Durasi Memori Spam</b>  —  <code>{waktu} menit</code>\n"
@@ -485,6 +487,7 @@ async def page_manage(chat_id: int):
             InlineKeyboardButton(f"🚫 Mention: {flag('anti_mention')}", callback_data=f"tgl_anti_mention_{chat_id}"),
         ],
         [
+            InlineKeyboardButton(f"🔗 Link: {flag('anti_link')}", callback_data=f"tgl_anti_link_{chat_id}"),
             InlineKeyboardButton(f"🔤 Filter ({regex_count})", callback_data=f"rgxpanel_{chat_id}"),
             InlineKeyboardButton(f"👑 VIP ({free_count})",     callback_data=f"freelist_{chat_id}"),
         ],

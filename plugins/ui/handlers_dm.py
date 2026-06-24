@@ -411,11 +411,11 @@ async def cb_view_wl(client, cb: CallbackQuery):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Callback: toggle on/off
 # ─────────────────────────────────────────────────────────────────────────────
-@Client.on_callback_query(filters.regex(r"^tgl_(local|global|bio_check|anti_mention|cas|anti_spam_ai)_(-?\d+)$"))
+@Client.on_callback_query(filters.regex(r"^tgl_(local|global|bio_check|anti_mention|anti_link|cas|anti_spam_ai)_(-?\d+)$"))
 async def cb_toggle(client, cb: CallbackQuery):
     await cb.answer()
     try:
-        m       = re.match(r"^tgl_(local|global|bio_check|anti_mention|cas|anti_spam_ai)_(-?\d+)$", cb.data)
+        m       = re.match(r"^tgl_(local|global|bio_check|anti_mention|anti_link|cas|anti_spam_ai)_(-?\d+)$", cb.data)
         key     = m.group(1)
         chat_id = int(m.group(2))
         user_id = cb.from_user.id
@@ -464,6 +464,14 @@ async def cb_toggle(client, cb: CallbackQuery):
             chat_id, key, not (cfg[key] is True),
             dm_chat_id=cb.message.chat.id, dm_msg_id=cb.message.id,
         )
+
+        # Invalidasi cache _any_bio_feature_active saat fitur yang berkaitan berubah
+        if key in ("bio_check",):
+            try:
+                from plugins.filters.bio import _invalidate_bio_feature_cache
+                _invalidate_bio_feature_cache(chat_id)
+            except Exception:
+                pass
 
         if key == "local":
             text, keyboard = await page_local_panel(chat_id)
@@ -842,6 +850,14 @@ async def cb_ns_toggle(client, cb: CallbackQuery):
         if new_val and not cfg.get("next_reset"):
             updates["next_reset"] = ns_calc_next_reset(cfg)
         ns_update_optimistic(chat_id, updates, dm_chat_id=cb.message.chat.id, dm_msg_id=cb.message.id)
+
+        # Invalidasi cache _any_bio_feature_active agar typing handler menyesuaikan
+        try:
+            from plugins.filters.bio import _invalidate_bio_feature_cache
+            _invalidate_bio_feature_cache(chat_id)
+        except Exception:
+            pass
+
         await cb.answer("✅ NewsCore " + ("diaktifkan!" if new_val else "dimatikan!"), show_alert=False)
         text, keyboard = await page_newscore(chat_id)
         await safe_edit(cb.message, text, keyboard)
