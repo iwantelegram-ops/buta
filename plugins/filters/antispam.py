@@ -12,8 +12,11 @@ SISTEM LOGGING:
   Telah dihubungkan secara penuh dengan plugins.commands.log (log_spam_lokal)
   sehingga setiap tindakan Fast-Path RAM langsung dilaporkan ke log worker/channel.
 ────────────────────────────
-Filter utama pesan grup yang dioptimalkan untuk kebal serangan massal lintas user,
-menjaga kestabilan log, dan memulihkan kembali sistem MUTE ESKALASI bawaan Anda.
+TOGGLE-DRIVEN DETECTION:
+  Setiap fitur deteksi (bukan hanya hukuman) dimatikan sepenuhnya saat toggle OFF.
+  - global OFF  → PROTEKSI A & B (RAM mass-burst) tidak berjalan sama sekali
+  - local OFF   → PROTEKSI C (RAM per-user) tidak berjalan sama sekali
+  - Logika detection_queue juga mengikuti toggle masing-masing fitur
 """
 
 import os
@@ -161,8 +164,6 @@ async def main_antispam_filter(client, message):
         return
 
     # ── Cek izin bot: HARUS punya delete_messages DAN restrict_members ───────
-    # Jika salah satu tidak ada → skip grup ini sepenuhnya (tidak inspect sama sekali).
-    # Cache 5 menit per grup agar tidak spam Telegram API tiap pesan masuk.
     if not await check_bot_permissions(client, cid):
         return
 
@@ -176,78 +177,79 @@ async def main_antispam_filter(client, message):
     if not content or content.startswith("/"):
         return
 
+    # ── Ambil config SEKALI di awal — semua fast-path RAM bergantung padanya ──
+    cfg    = await get_config(cid)
+    global_on = cfg.get("global") is True
+    local_on  = cfg.get("local")  is True
+
     content_hash = hashlib.md5(content.encode("utf-8", errors="ignore")).hexdigest()
     now_ts = time.time()
 
     # ── PROTEKSI A: Karantina RAM Sementara (Serangan Massal Banyak Akun) ──────
-    if cid in _global_text_blacklist and content_hash in _global_text_blacklist[cid]:
+    # Hanya berjalan jika toggle global ON
+    if global_on and cid in _global_text_blacklist and content_hash in _global_text_blacklist[cid]:
         if now_ts < _global_text_blacklist[cid][content_hash]:
             mark_message_handled(cid, mid)
-            
-            # Hubungkan kembali Eskalasi Hukuman & Logger utama Anda
             asyncio.create_task(check_and_punish(client, message, "MASS_FLOOD_BURST_RAM", content))
             asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="MASS_FLOOD_BURST_RAM"))
-            
             asyncio.create_task(message.delete())
             return
         else:
             _global_text_blacklist[cid].pop(content_hash, None)
 
     # ── PROTEKSI B: Deteksi Serangan Massal Banyak Akun Kloning (Lintas User) ──
-    if cid not in _global_text_tracker:
-        _global_text_tracker[cid] = {}
-    
-    if content_hash not in _global_text_tracker[cid]:
-        _global_text_tracker[cid][content_hash] = []
-        
-    _global_text_tracker[cid][content_hash].append(now_ts)
-    
-    _global_text_tracker[cid][content_hash] = [
-        ts for ts in _global_text_tracker[cid][content_hash] 
-        if (now_ts - ts) <= _MASS_BURST_WINDOW
-    ]
-    
-    if len(_global_text_tracker[cid][content_hash]) >= _MASS_BURST_LIMIT:
-        if cid not in _global_text_blacklist:
-            _global_text_blacklist[cid] = {}
-        
-        _global_text_blacklist[cid][content_hash] = now_ts + _LOCK_DURATION
-        
-        mark_message_handled(cid, mid)
-        
-        # Hubungkan kembali Eskalasi Hukuman & Logger utama Anda
-        asyncio.create_task(check_and_punish(client, message, "MASS_FLOOD_BURST_RAM", content))
-        asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="MASS_FLOOD_BURST_RAM"))
-        
-        asyncio.create_task(message.delete())
-        return
+    # Tracking & eksekusi hanya jika toggle global ON
+    if global_on:
+        if cid not in _global_text_tracker:
+            _global_text_tracker[cid] = {}
+
+        if content_hash not in _global_text_tracker[cid]:
+            _global_text_tracker[cid][content_hash] = []
+
+        _global_text_tracker[cid][content_hash].append(now_ts)
+
+        _global_text_tracker[cid][content_hash] = [
+            ts for ts in _global_text_tracker[cid][content_hash]
+            if (now_ts - ts) <= _MASS_BURST_WINDOW
+        ]
+
+        if len(_global_text_tracker[cid][content_hash]) >= _MASS_BURST_LIMIT:
+            if cid not in _global_text_blacklist:
+                _global_text_blacklist[cid] = {}
+
+            _global_text_blacklist[cid][content_hash] = now_ts + _LOCK_DURATION
+
+            mark_message_handled(cid, mid)
+            asyncio.create_task(check_and_punish(client, message, "MASS_FLOOD_BURST_RAM", content))
+            asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="MASS_FLOOD_BURST_RAM"))
+            asyncio.create_task(message.delete())
+            return
 
     # ── PROTEKSI C: Deteksi Duplikasi Tunggal Per-User ────────────────────────
-    if cid not in _local_flood_cache:
-        _local_flood_cache[cid] = {}
+    # Tracking & eksekusi hanya jika toggle local ON
+    if local_on:
+        if cid not in _local_flood_cache:
+            _local_flood_cache[cid] = {}
 
-    user_flood_data = _local_flood_cache[cid].get(uid)
+        user_flood_data = _local_flood_cache[cid].get(uid)
 
-    if user_flood_data:
-        last_hash, last_time, duplicate_count = user_flood_data
-        
-        if last_hash == content_hash and (now_ts - last_time) < _FLOOD_WINDOW:
-            duplicate_count += 1
-            _local_flood_cache[cid][uid] = (content_hash, now_ts, duplicate_count)
-            
-            if duplicate_count >= _MAX_DUPLICATE:
-                mark_message_handled(cid, mid)
-                
-                # Hubungkan kembali Eskalasi Hukuman & Logger utama Anda
-                asyncio.create_task(check_and_punish(client, message, "LOCAL_FLOOD_RAM", content))
-                asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="LOCAL_FLOOD_RAM"))
-                
-                asyncio.create_task(message.delete())
-                return  
+        if user_flood_data:
+            last_hash, last_time, duplicate_count = user_flood_data
+
+            if last_hash == content_hash and (now_ts - last_time) < _FLOOD_WINDOW:
+                duplicate_count += 1
+                _local_flood_cache[cid][uid] = (content_hash, now_ts, duplicate_count)
+
+                if duplicate_count >= _MAX_DUPLICATE:
+                    mark_message_handled(cid, mid)
+                    asyncio.create_task(check_and_punish(client, message, "LOCAL_FLOOD_RAM", content))
+                    asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="LOCAL_FLOOD_RAM"))
+                    asyncio.create_task(message.delete())
+                    return
+            else:
+                _local_flood_cache[cid][uid] = (content_hash, now_ts, 1)
         else:
             _local_flood_cache[cid][uid] = (content_hash, now_ts, 1)
-    else:
-        _local_flood_cache[cid][uid] = (content_hash, now_ts, 1)
 
     # ── Enqueue ke detection_queue (Untuk sistem antrean latar belakang bawaan) ──
     from core.antispam_queue import enqueue_for_detection

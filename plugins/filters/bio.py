@@ -194,6 +194,50 @@ async def _check_vip_bio(chat_id: int, user_id: int, vip_text: str) -> bool:
 _ns_bio_check_ts: dict[tuple[int, int], float] = {}
 _NS_BIO_CHECK_COOLDOWN = _MEM_CACHE_TTL  # ikut TTL bio yang sama
 
+# ── Cache: apakah salah satu fitur bio aktif di grup ini ─────────────────────
+# Agar tidak query DB tiap pesan/typing hanya untuk cek "apakah perlu prefetch".
+# TTL = sama dengan MEM_CACHE_TTL sehingga menyesuaikan jika admin toggle fitur.
+_bio_feature_active_cache: dict[int, tuple[bool, float]] = {}
+
+
+async def _any_bio_feature_active(chat_id: int) -> bool:
+    """
+    Return True jika setidaknya SATU fitur yang membutuhkan data bio aktif
+    di grup ini: bio_check (link detector), Security OS, atau NewsCore.
+
+    Dipakai oleh typing handler agar prefetch cache bio tetap berjalan
+    meski bio_check mati — selama Security OS atau NewsCore masih butuh data bio.
+    """
+    now = time.monotonic()
+    cached = _bio_feature_active_cache.get(chat_id)
+    if cached and (now - cached[1]) < _MEM_CACHE_TTL:
+        return cached[0]
+
+    result = False
+    try:
+        cfg = await get_config(chat_id)
+        if cfg.get("bio_check"):
+            result = True
+        if not result:
+            ns_cfg = await db["ns_config"].find_one({"chat_id": chat_id}) or {}
+            if ns_cfg.get("enabled") and ns_cfg.get("bio_admin_required", True) and ns_cfg.get("bio_admin_text", "").strip():
+                result = True
+        if not result:
+            secos_doc = await db["security_os"].find_one({"chat_id": chat_id}) or {}
+            if secos_doc.get("enabled"):
+                result = True
+    except Exception as e:
+        print(f"[Bio] _any_bio_feature_active error chat={chat_id}: {e}")
+        result = False
+
+    _bio_feature_active_cache[chat_id] = (result, now)
+    return result
+
+
+def _invalidate_bio_feature_cache(chat_id: int) -> None:
+    """Hapus cache _any_bio_feature_active saat toggle berubah."""
+    _bio_feature_active_cache.pop(chat_id, None)
+
 
 async def _check_ns_admin_bio(client: Client, chat_id: int, user_id: int) -> None:
     """
@@ -390,31 +434,33 @@ async def bio_typing_handler(client: Client, update, users, chats):
         if not await check_bot_permissions(client, chat_id):
             return
 
-        # Cek konfigurasi bio_check aktif di grup ini
-        try:
-            cfg = await get_config(chat_id)
-            if not cfg.get("bio_check"):
-                return
-        except Exception:
+        # ── Cek apakah SETIDAKNYA SATU fitur yang butuh data bio aktif ───────
+        # bio_check = filter link bio biasa
+        # Security OS / NewsCore = fitur lain yang juga butuh data bio di DB
+        # Jika semua OFF → tidak ada gunanya prefetch, langsung return.
+        if not await _any_bio_feature_active(chat_id):
             return
 
-        # ── VIP Bio: jika user sudah terbukti VIP (dari cache), skip trigger ──
-        vip_text = (cfg.get("bio_vip_text") or "").strip()
-        if vip_text:
-            is_vip = await _check_vip_bio(chat_id, user_id, vip_text)
-            if is_vip:
-                # Sama seperti di bio_filter — daftarkan VIP bio + buka mute
-                # jika ada. Tidak masalah dipanggil berulang, sudah idempotent.
-                from core.vip_bio_guard import maybe_enter_vip_bio
-                asyncio.create_task(maybe_enter_vip_bio(client, chat_id, user_id))
-                return  # User VIP → tidak perlu trigger bot pemantau
+        cfg = await get_config(chat_id)
 
-        # Cek data di DB dulu — jika ada, tidak perlu trigger
+        # ── VIP Bio: hanya relevan jika bio_check aktif ───────────────────────
+        if cfg.get("bio_check"):
+            vip_text = (cfg.get("bio_vip_text") or "").strip()
+            if vip_text:
+                is_vip = await _check_vip_bio(chat_id, user_id, vip_text)
+                if is_vip:
+                    from core.vip_bio_guard import maybe_enter_vip_bio
+                    asyncio.create_task(maybe_enter_vip_bio(client, chat_id, user_id))
+                    return  # User VIP → tidak perlu trigger bot pemantau
+
+        # ── Prefetch cache bio jika data tidak ada / expired ─────────────────
+        # Berjalan selama SALAH SATU fitur yang butuh data bio aktif,
+        # bukan hanya saat bio_check aktif.
         has_link = await _query_bio_for_group(chat_id, user_id)
         if has_link is not None:
             return  # Data sudah ada dan masih valid
 
-        # Data tidak ada / expired → trigger bot pemantau
+        # Data tidak ada / expired → trigger bot pemantau untuk isi cache
         try:
             from monitor_bot_reference import force_check_user
             result = await force_check_user(chat_id, user_id)
