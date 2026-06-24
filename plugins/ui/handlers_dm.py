@@ -28,6 +28,7 @@ from database import (
     get_config, update_config, update_config_optimistic,
     invalidate_count_cache, invalidate_admin_groups_cache,
     register_panel_rollback_callback,
+    check_bot_permissions,
 )
 from plugins.ui.pages import (
     page_start, page_guide, page_manage, page_group_log,
@@ -300,7 +301,6 @@ async def cb_admin_menu(client, cb: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^manage_(-?\d+)$"))
 async def cb_manage(client, cb: CallbackQuery):
-    await cb.answer()
     clear_all_fsm(cb.from_user.id)
     chat_id = int(re.search(r"(-?\d+)$", cb.data).group(1))
     user_id = cb.from_user.id
@@ -308,6 +308,7 @@ async def cb_manage(client, cb: CallbackQuery):
     # Buka sesi baru — verifikasi ke Telegram bahwa user masih admin
     ok = await _adm_sess.open_session(client, user_id, chat_id)
     if not ok:
+        await cb.answer()
         await safe_edit(
             cb.message,
             "<b>❖ AKSES DITOLAK ❖</b>\n\n"
@@ -317,7 +318,35 @@ async def cb_manage(client, cb: CallbackQuery):
         )
         return
 
+    # ── Cek izin bot di grup ini ──────────────────────────────────────────────
+    # Bot HARUS punya KEDUA izin: Hapus Pesan DAN Batasi Anggota.
+    # Jika tidak → tampilkan notifikasi mengambang (show_alert) sebelum panel,
+    # lalu tetap buka panel agar admin bisa lihat pengaturan (hanya baca).
+    has_perms = await check_bot_permissions(client, chat_id)
+    if not has_perms:
+        await cb.answer(
+            "⚠️ Bot kekurangan izin di grup ini!\n\n"
+            "Bot perlu 2 izin admin:\n"
+            "• Hapus Pesan\n"
+            "• Batasi Anggota\n\n"
+            "Berikan kedua izin itu agar bot bisa bekerja di grup ini.",
+            show_alert=True,
+        )
+    else:
+        await cb.answer()
+
     text, keyboard = await page_manage(chat_id)
+
+    # Jika izin kurang → tambahkan banner peringatan di atas panel
+    if not has_perms:
+        text = (
+            "⚠️ <b>BOT KEKURANGAN IZIN DI GRUP INI</b>\n"
+            "Bot tidak dapat menghapus pesan atau membatasi anggota.\n"
+            "Berikan izin admin <b>Hapus Pesan</b> + <b>Batasi Anggota</b> "
+            "agar semua filter aktif.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        ) + text
+
     await safe_edit(cb.message, text, keyboard)
 
 
