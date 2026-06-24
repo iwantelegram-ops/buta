@@ -483,7 +483,7 @@ def generate_all_mutations(pola: str) -> tuple[list, str]:
 #  BAGIAN 5 — Interlock Regex Builder (untuk grup & owner)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_group_interlock(raw_input: str) -> tuple[str, list[str]]:
+def build_group_interlock(raw_input: str) -> tuple[str, list[tuple[str, list[str]]], str]:
   """
   Parse 'kata | kata | kata' dan rakit interlock pola ala nexus owner.
 
@@ -492,8 +492,18 @@ def build_group_interlock(raw_input: str) -> tuple[str, list[str]]:
   Pola akhir adalah gabungan semua lookahead — cocok hanya jika SEMUA kata
   hadir sekaligus (AND semantics).
 
-  Return:
-    (pola_regex: str, kata_bersih_list: list[str])
+  Return signature dan urutan step IDENTIK dengan _build_owner_interlock
+  di nexus_handlers.py:
+    (pola_regex: str, mutasi_display: list[tuple[str, list[str]]], "")
+
+  Urutan step per-kata:
+    1. pipeline_pembersihan(kata)          → validasi saja (cek kosong)
+                                             BUKAN sumber kata ke generator
+    2. re.sub counter symbols              → buang ×3, (x2) dll
+    3. re.sub non-word chars               → kata_bersih, KAPITAL DIJAGA
+    4. split()[0]                          → kata_token dengan kapital utuh
+    5. generate_kandidat_mutasi_liar(kata_token) → kapital sebagai posisi wajib
+    6. mutasi_display.append((token.lower(), mutasi)) → key lowercase, mutasi benar
 
   Raises:
     ValueError jika input kosong atau tidak menghasilkan kata valid.
@@ -502,29 +512,35 @@ def build_group_interlock(raw_input: str) -> tuple[str, list[str]]:
   if not kata_list:
       raise ValueError("Input kosong — minimal satu kata.")
 
-  lookaheads       = []
-  kata_bersih_list = []
+  lookaheads     = []
+  mutasi_display = []
 
   for kata in kata_list:
-      # Simpan versi asli (dengan kapital) untuk diteruskan ke generator mutasi
-      kata_asli_bersih = re.sub(r"\(?[×xX]\d+\)?", "", kata)
-      kata_asli_bersih = re.sub(r"[^\w]", "", kata_asli_bersih).strip()
-      kata_asli_token  = kata_asli_bersih.split()[0] if kata_asli_bersih else ""
+      # Validasi: pastikan kata tidak kosong setelah dibersihkan
       kata_clean = pipeline_pembersihan(kata)
-      if not kata_clean or not kata_asli_token:
+      if not kata_clean:
           continue
-      # Teruskan string asli (dengan info kapital) ke generator
-      mutasi     = generate_kandidat_mutasi_liar(kata_asli_token)
+
+      # Bersihkan simbol tapi JAGA KAPITAL — ini yang dikirim ke generator
+      # (logika identik dengan _build_owner_interlock)
+      kata_bersih = re.sub(r"\(?[×xX]\d+\)?", "", kata)
+      kata_bersih = re.sub(r"[^\w]", "", kata_bersih).strip()
+      kata_token  = kata_bersih.split()[0] if kata_bersih else ""
+      if not kata_token:
+          continue
+
+      mutasi = generate_kandidat_mutasi_liar(kata_token)
+
       if mutasi:
-          alts = "|".join(mutasi)
-          lookaheads.append(f"(?=.*({alts}))")
-          kata_bersih_list.append(kata_asli_token.lower())
+          lookaheads.append(f"(?=.*({'|'.join(mutasi)}))")
+          # Simpan token lowercase + daftar mutasi — sama persis dengan owner
+          mutasi_display.append((kata_token.lower(), mutasi))
 
   if not lookaheads:
       raise ValueError("Semua kata kosong atau tidak menghasilkan mutasi valid.")
 
   pola = "".join(lookaheads)
-  return pola, kata_bersih_list
+  return pola, mutasi_display, ""
 
 
 # Alias untuk kompatibilitas mundur (regex_group.py & handlers_fsm.py lama)
