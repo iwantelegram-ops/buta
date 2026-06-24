@@ -115,29 +115,48 @@ async def _log_mute_failed(client, message, spam_type: str) -> None:
     """
     Peringatkan owner/admin via LOG_CHANNEL saat eksekusi mute API gagal
     (biasanya karena bot bukan admin grup atau kehilangan izin restrict).
-    Tanpa ini, kegagalan mute tidak pernah terlihat oleh siapa pun.
     """
-    from plugins.commands.log import _send_log
+    from plugins.commands.log import _send_log, _fmt_waktu, _user_line
 
     uid          = message.from_user.id
     cid          = message.chat.id
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
-    waktu        = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
+    user_mention = _user_line(uid, message.from_user.first_name)
+
+    # Detail alasan per jenis pelanggaran
+    detail = _mute_detail(spam_type)
 
     log_text = (
-        "<b>❖ ANTI-SPAM — MUTE GAGAL ❖</b>\n"
-        "⚠️ <b>Bot Tidak Bisa Mute User</b>\n"
+        "<b>❖ MUTE GAGAL — IZIN BOT TIDAK CUKUP ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"⚠️ <b>Tipe:</b> Eksekusi Mute Gagal\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
-        f"◈ <b>Alasan Pelanggaran:</b> {spam_type} — 10× berturut-turut\n"
-        f"◈ <b>Kemungkinan Sebab:</b> Bot bukan admin / tidak punya izin "
-        f"restrict member di grup ini.\n\n"
-        f"<i>Pesan user TIDAK dianggap dalam masa mute — silakan cek izin admin bot di grup ini.</i>"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
+        f"◈ <b>Pemicu:</b> {spam_type} — 10× berturut-turut\n"
+        f"{detail}\n"
+        f"◈ <b>Sebab gagal:</b> Bot bukan admin / tidak punya izin restrict\n"
+        f"<i>Pesan user tidak dianggap masa mute — cek izin admin bot di grup ini.</i>"
         "</blockquote>"
     )
     await _send_log(client, log_text)
+
+
+def _mute_detail(spam_type: str) -> str:
+    """Kembalikan baris detail alasan mute berdasarkan jenis spam."""
+    _map = {
+        "filter kata global":       "◈ <b>Keterangan:</b> Pelanggaran filter kata dari daftar owner berulang kali",
+        "filter kata grup":         "◈ <b>Keterangan:</b> Pelanggaran filter kata lokal grup berulang kali",
+        "mention pengguna luar":    "◈ <b>Keterangan:</b> Berulang kali menyebut user yang bukan anggota grup",
+        "link dalam pesan":         "◈ <b>Keterangan:</b> Berulang kali mengirim pesan berisi tautan/URL",
+        "spam duplikat lokal":      "◈ <b>Keterangan:</b> Berulang kali mengirim pesan duplikat/mirip dalam satu grup",
+        "anti-gcast global":        "◈ <b>Keterangan:</b> Berulang kali menyebar pesan identik ke banyak grup sekaligus",
+        "bio link":                 "◈ <b>Keterangan:</b> Berulang kali mengirim pesan dengan bio yang mengandung link",
+    }
+    key = spam_type.lower().strip()
+    for k, v in _map.items():
+        if k in key:
+            return v
+    return f"◈ <b>Keterangan:</b> Pelanggaran <i>{spam_type}</i> mencapai ambang batas"
 
 
 async def _log_mute(
@@ -150,12 +169,14 @@ async def _log_mute(
     konten: str,
 ) -> None:
     """Log aksi mute ke group action log dan LOG_CHANNEL."""
+    from plugins.commands.log import _send_log, _fmt_waktu, _user_line
+
     user_name = message.from_user.first_name or str(uid)
 
     try:
         await insert_group_action_log(
             cid, "MUTE",
-            f"Mute {duration_min} menit – {spam_type} 10× berturut-turut",
+            f"Mute {duration_min} mnt — {spam_type} 10×",
             uid, user_name, konten,
         )
     except Exception:
@@ -164,20 +185,20 @@ async def _log_mute(
     if not LOG_CHANNEL:
         return
 
-    waktu        = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
-    user_mention = f"<a href='tg://user?id={uid}'>{user_name}</a>"
+    user_mention = _user_line(uid, user_name)
+    detail       = _mute_detail(spam_type)
 
     log_text = (
-        "<b>❖ ANTI-SPAM — MUTE DITERAPKAN ❖</b>\n"
-        "🔇 <b>User Di-Mute Otomatis</b>\n"
+        "<b>❖ MUTE OTOMATIS — AMBANG SPAM TERCAPAI ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"🔇 <b>Tipe:</b> Mute Otomatis Anti-Spam\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
         f"◈ <b>Durasi:</b> {duration_min} menit\n"
-        f"◈ <b>Alasan:</b> {spam_type} — 10× berturut-turut\n\n"
-        f"<b>Konten:</b> <code>{konten[:300]}</code>"
+        f"◈ <b>Pemicu:</b> {spam_type} — 10× berturut-turut\n"
+        f"{detail}\n\n"
+        f"📨 <b>Konten terakhir:</b>\n<code>{konten[:300]}</code>"
         "</blockquote>"
     )
-    from plugins.commands.log import _send_log
     await _send_log(client, log_text)

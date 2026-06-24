@@ -246,7 +246,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
             mark_message_handled(cid, mid)
             await delete_queue.put((cid, [mid]))
             asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", f"Filter kata global – {raw[:60]}",
+                cid, "HAPUS", f"Filter Regex Global — pola: {raw[:50]}",
                 uid, message.from_user.first_name or str(uid), content[:100],
             ))
             asyncio.create_task(check_and_punish(client, message, "filter kata global", content[:100]))
@@ -259,7 +259,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
             mark_message_handled(cid, mid)
             await delete_queue.put((cid, [mid]))
             asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", f"Filter kata grup – {raw[:60]}",
+                cid, "HAPUS", f"Filter Regex Grup — pola: {raw[:50]}",
                 uid, message.from_user.first_name or str(uid), content[:100],
             ))
             asyncio.create_task(check_and_punish(client, message, "filter kata grup", content[:100]))
@@ -289,7 +289,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
             mark_message_handled(cid, mid)
             await delete_queue.put((cid, [mid]))
             asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", "Mention pengguna luar grup",
+                cid, "HAPUS", "Mention Pengguna Luar Grup — sebut user bukan anggota",
                 uid, message.from_user.first_name or str(uid), content[:100],
             ))
             asyncio.create_task(check_and_punish(client, message, "mention pengguna luar", content[:100]))
@@ -300,7 +300,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
         mark_message_handled(cid, mid)
         await delete_queue.put((cid, [mid]))
         asyncio.create_task(insert_group_action_log(
-            cid, "HAPUS", "Link terdeteksi dalam pesan",
+            cid, "HAPUS", "Link Detector — URL/tautan aktif dalam pesan",
             uid, message.from_user.first_name or str(uid), content[:100],
         ))
         asyncio.create_task(check_and_punish(client, message, "link dalam pesan", content[:100]))
@@ -334,7 +334,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
             mark_message_handled(cid, mid)
             await delete_queue.put((cid, [matched_old["msg_id"], mid]))
             asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", "Pesan duplikat berulang",
+                cid, "HAPUS", "Anti-Spam Duplikat Lokal — pesan mirip dikirim berulang",
                 uid, message.from_user.first_name or str(uid), content[:100],
             ))
             asyncio.create_task(check_and_punish(
@@ -403,7 +403,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
                         await delete_queue.put((loc_cid, [loc_mid]))
                         asyncio.create_task(insert_group_action_log(
                             loc_cid, "HAPUS",
-                            f"Anti-duplikat gcast global – dikirim ke {n_chats} grup sekaligus",
+                            f"Anti-Broadcast Gcast Global — disebar ke {n_chats} grup sekaligus",
                             uid, message.from_user.first_name or str(uid), content[:100],
                         ))
                         if loc_cid == cid:
