@@ -256,7 +256,7 @@ async def _handle_free_input(client, message: Message, user_id: int, state: dict
 
     await free_col.update_one(
         {"user_id": target_id, "chat_id": chat_id},
-        {"$set": {"user_id": target_id, "chat_id": chat_id}},
+        {"$set": {"user_id": target_id, "chat_id": chat_id, "source": "manual"}},
         upsert=True,
     )
     # Invalidasi cache VIP agar /unmutemic langsung mengenali status VIP baru.
