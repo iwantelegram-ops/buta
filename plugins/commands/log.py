@@ -6,7 +6,8 @@ Logging ke channel owner:
   - /list (owner DM) → lihat semua grup aktif
   - Log deteksi alasan pesan dihapus (group=3)
 
-FIXED: Peer id invalid pada log_new_group ditangani lebih baik.
+Desain log SERAGAM: semua pakai header ❖ JUDUL ❖ + blockquote isi.
+Tiap jenis pelanggaran punya detail alasan spesifik (bukan generic).
 """
 
 import os
@@ -35,33 +36,21 @@ free_col            = db["free_per_group"]
 group_regex_db      = db["regex_per_group"]
 _log_local_regex_cache: dict[int, tuple[list, float]] = {}
 
-# Cached validity flag so repeated Peer id errors don't spam console.
-# FIXED: Sebelumnya False permanen — sekarang pakai retry interval 5 menit
-# agar bot otomatis mencoba kembali setelah sesi baru berhasil terhubung ke channel.
 _log_channel_valid: bool | None = None
 _log_channel_fail_ts: float = 0.0
 _LOG_CHANNEL_RETRY_INTERVAL = 300  # 5 menit sebelum retry setelah gagal
 
 # ── BATCHING LOG QUEUE ────────────────────────────────────────────────────────
-# FIXED: Sebelumnya tiap pelanggaran (spam lokal/global/regex) langsung
-# memanggil send_message ke LOG_CHANNEL satu per satu → di grup ramai ini
-# memicu FloodWait yang menumpuk progresif dan log akhirnya di-drop permanen
-# (lihat [PUNISHMENT LOG ERROR]). Sekarang semua log masuk ke queue in-memory
-# dan di-flush oleh satu worker setiap LOG_FLUSH_INTERVAL detik, digabung jadi
-# 1 pesan (atau dipecah per LOG_MAX_CHARS jika antrian besar). Ini menekan
-# jumlah panggilan send_message ke LOG_CHANNEL jadi maksimal 1x per interval,
-# berapa pun banyaknya grup/pelanggaran yang masuk bersamaan.
-LOG_FLUSH_INTERVAL = int(os.environ.get("LOG_FLUSH_INTERVAL", 8))   # detik
-LOG_MAX_CHARS       = 3500   # batas aman di bawah limit 4096 char Telegram
-LOG_MAX_QUEUE       = 500    # safety cap agar memory tidak membengkak saat flood ekstrem
+LOG_FLUSH_INTERVAL = int(os.environ.get("LOG_FLUSH_INTERVAL", 8))
+LOG_MAX_CHARS       = 3500
+LOG_MAX_QUEUE       = 500
 
 _log_queue: list[str] = []
 _log_queue_lock = asyncio.Lock()
-_log_dropped_count = 0  # entri yang dibuang karena queue penuh (dilaporkan saat flush)
+_log_dropped_count = 0
 
 
 async def _enqueue_log(text: str) -> None:
-    """Masukkan 1 entri log ke queue (non-blocking, tidak langsung kirim API)."""
     global _log_dropped_count
     if not LOG_CHANNEL:
         return
@@ -73,31 +62,15 @@ async def _enqueue_log(text: str) -> None:
 
 
 async def _send_log(client: Client, text: str) -> bool:
-    """
-    Kompatibilitas: dipanggil oleh kode lama yang mengharapkan kirim langsung.
-    Sekarang hanya memasukkan ke queue batching — pengiriman aktual dilakukan
-    oleh log_flush_worker_loop(). Selalu return True karena enqueue tidak pernah
-    gagal akibat FloodWait (FloodWait hanya terjadi saat flush, ditangani di sana).
-    """
     await _enqueue_log(text)
     return True
 
 
 async def _flush_log_queue_once(client: Client) -> None:
-    """
-    Ambil semua entri di queue, gabung menjadi pesan-pesan sebesar mungkin
-    (<= LOG_MAX_CHARS), kirim berurutan. Jika kena FloodWait, entri yang
-    belum terkirim dikembalikan ke depan queue agar dicoba lagi di siklus
-    berikutnya (tidak hilang).
-
-    KOORDINASI LINTAS WORKER: cek global flood backoff sebelum kirim —
-    mundur jika delete_worker atau moderation_worker baru kena FloodWait.
-    """
     global _log_channel_valid, _log_channel_fail_ts, _log_dropped_count
     if not LOG_CHANNEL:
         return
 
-    # Cek global flood backoff — mundur jika worker lain baru kena FloodWait
     await wait_global_flood_backoff()
 
     async with _log_queue_lock:
@@ -112,7 +85,6 @@ async def _flush_log_queue_once(client: Client) -> None:
         if time.time() - _log_channel_fail_ts >= _LOG_CHANNEL_RETRY_INTERVAL:
             _log_channel_valid = None
         else:
-            # Channel masih dianggap invalid — jangan buang antrian, kembalikan
             async with _log_queue_lock:
                 _log_queue[0:0] = pending
                 _log_dropped_count += dropped
@@ -123,7 +95,6 @@ async def _flush_log_queue_once(client: Client) -> None:
             f"⚠️ <b>{dropped} entri log dibuang</b> (antrian penuh saat flood tinggi)."
         )
 
-    # Gabungkan entri-entri jadi batch besar selama masih di bawah LOG_MAX_CHARS
     batches: list[str] = []
     current = ""
     sep = "\n\n— — —\n\n"
@@ -139,8 +110,6 @@ async def _flush_log_queue_once(client: Client) -> None:
 
     not_sent: list[str] = []
     for i, batch_text in enumerate(batches):
-        # Jeda antar batch dalam satu siklus flush — mencegah burst send_message
-        # ke 1 peer (LOG_CHANNEL) saat antrian besar (500 entri ~ 14 pesan sekaligus).
         if i > 0:
             await asyncio.sleep(0.5)
         try:
@@ -160,7 +129,7 @@ async def _flush_log_queue_once(client: Client) -> None:
             break
         except FloodWait as e:
             print(f"[LOG] FloodWait {e.value}s — batch ditunda, dikembalikan ke antrian.")
-            set_global_flood_backoff(e.value)   # beritahu worker lain untuk mundur
+            set_global_flood_backoff(e.value)
             not_sent.extend(batches[i:])
             break
         except Exception as e:
@@ -169,18 +138,11 @@ async def _flush_log_queue_once(client: Client) -> None:
             break
 
     if not_sent:
-        # Kembalikan batch yang gagal terkirim ke depan antrian (sebagai 1 blok
-        # gabungan) agar dicoba lagi di siklus flush berikutnya, tidak hilang.
         async with _log_queue_lock:
             _log_queue[0:0] = not_sent
 
 
 async def log_flush_worker_loop(client: Client) -> None:
-    """
-    Worker tunggal yang flush antrian log setiap LOG_FLUSH_INTERVAL detik.
-    Dijalankan sekali sebagai background task (lihat antigcast.py), sama
-    seperti pola panel_write_worker / ns_flush_worker_loop yang sudah ada.
-    """
     while True:
         try:
             await _flush_log_queue_once(client)
@@ -204,6 +166,16 @@ async def _get_local_patterns_log(chat_id: int):
     return patterns
 
 
+# ── Helper: format waktu ──────────────────────────────────────────────────────
+def _fmt_waktu() -> str:
+    return datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
+
+
+# ── Helper: baris user ────────────────────────────────────────────────────────
+def _user_line(uid: int, name: str) -> str:
+    return f"<a href='tg://user?id={uid}'>{name}</a> (<code>{uid}</code>)"
+
+
 # ── LOG 1: Bot masuk grup baru ────────────────────────────────────────────────
 @Client.on_message(filters.service, group=10)
 async def log_new_group(client: Client, message: Message):
@@ -213,15 +185,16 @@ async def log_new_group(client: Client, message: Message):
     for member in message.new_chat_members:
         if member.id == me.id:
             chat  = message.chat
-            waktu = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
             text  = (
-                "<b>❖ SYSTEM — NODE BARU ❖</b>\n\n"
-                "➕ <b>Bot Bergabung ke Grup Baru</b>\n"
-                f"◈ <b>Nama Grup:</b> {chat.title}\n"
-                f"◈ <b>ID Grup:</b> <code>{chat.id}</code>\n"
+                "<b>❖ SISTEM — NODE BARU ❖</b>\n"
+                "<blockquote>"
+                "➕ Bot bergabung ke grup baru\n"
+                f"◈ <b>Grup:</b> {chat.title}\n"
+                f"◈ <b>ID:</b> <code>{chat.id}</code>\n"
                 f"◈ <b>Username:</b> @{chat.username if chat.username else '—'}\n"
-                f"◈ <b>Waktu:</b> {waktu}\n\n"
-                "<i>Sistem firewall telah diintegrasikan pada grup ini.</i>"
+                f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
+                "<i>Firewall aktif pada grup ini.</i>"
+                "</blockquote>"
             )
             await _send_log(client, text)
 
@@ -300,7 +273,6 @@ async def log_deletion_trigger(client: Client, message: Message):
     alasan = None
     detail = ""
     now_ts = time.time()
-    waktu  = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
     regex_safe       = remove_mentions_for_regex(message)
     teks_super_clean = pipeline_pembersihan(content)
 
@@ -314,17 +286,23 @@ async def log_deletion_trigger(client: Client, message: Message):
         except Exception:
             continue
         if match_with_leet(pat, regex_safe) or (teks_super_clean and pat.search(teks_super_clean)):
-            alasan  = "Filter Owner — Regex Global"
             raw_tag = doc.get("raw", pat.pattern)
-            detail  = f"◈ <b>Pola:</b> <code>{raw_tag}</code>"
+            alasan  = "Filter Regex Global"
+            detail  = (
+                f"◈ <b>Pola cocok:</b> <code>{raw_tag}</code>\n"
+                f"◈ <b>Keterangan:</b> Kata kunci dalam daftar filter owner"
+            )
             break
 
     # Regex lokal (Group Filter)
     if not alasan:
         for pat, raw_pattern in await _get_local_patterns_log(cid):
             if match_with_leet(pat, regex_safe):
-                alasan = "Filter Kata — Regex Grup"
-                detail = f"◈ <b>Pola:</b> <code>{raw_pattern}</code>"
+                alasan = "Filter Regex Grup"
+                detail = (
+                    f"◈ <b>Pola cocok:</b> <code>{raw_pattern}</code>\n"
+                    f"◈ <b>Keterangan:</b> Kata kunci dalam filter lokal grup ini"
+                )
                 break
 
     # Anti-duplikasi lokal
@@ -333,8 +311,11 @@ async def log_deletion_trigger(client: Client, message: Message):
             "chat_id": cid, "msg_id": message.id, "type": "local_track"
         })
         if lokal_record and lokal_record.get("warned") is True:
-            alasan = "Anti-Spam Duplikasi Lokal"
-            detail = "◈ <b>Alasan:</b> Pesan duplikat dalam satu sesi"
+            alasan = "Anti-Spam Duplikat Lokal"
+            detail = (
+                "◈ <b>Keterangan:</b> Pesan identik/mirip dikirim berulang\n"
+                f"◈ <b>Interval deteksi:</b> {cfg.get('expiry', 60)} detik"
+            )
 
     # Anti-gcast global
     if not alasan and cfg.get("global") is True:
@@ -343,9 +324,12 @@ async def log_deletion_trigger(client: Client, message: Message):
         existing     = await messages_db.find_one({"_id": global_key})
         if existing and (now_ts - existing.get("time", 0)) < GLOBAL_EXPIRY:
             if len(existing.get("locations", [])) >= 2:
-                alasan = "Anti-Broadcast Gcast Global"
                 locs   = existing.get("locations", [])
-                detail = f"◈ <b>Dikirim ke:</b> {len(locs)} grup sekaligus"
+                alasan = "Anti-Broadcast Gcast Global"
+                detail = (
+                    f"◈ <b>Keterangan:</b> Pesan disebar serentak ke {len(locs)} grup\n"
+                    "◈ <b>Indikator:</b> Konten identik muncul di beberapa grup dalam waktu singkat"
+                )
 
     # Bio link
     if not alasan and cfg.get("bio_check") is True:
@@ -354,7 +338,10 @@ async def log_deletion_trigger(client: Client, message: Message):
             hit = _bio_cache.get(uid)
             if hit and hit[0] is True:
                 alasan = "Bio Link Detector"
-                detail = "◈ <b>Alasan:</b> Bio mengandung tautan"
+                detail = (
+                    "◈ <b>Keterangan:</b> Profil bio user mengandung tautan/link\n"
+                    "◈ <b>Kebijakan:</b> Pesan dari user berbio link dihapus otomatis"
+                )
         except ImportError:
             pass
 
@@ -364,81 +351,88 @@ async def log_deletion_trigger(client: Client, message: Message):
         all_entities = list(message.entities or []) + list(message.caption_entities or [])
         if any(e.type in url_types for e in all_entities):
             alasan = "Link Detector"
-            detail = "◈ <b>Alasan:</b> Pesan mengandung tautan aktif"
+            detail = (
+                "◈ <b>Keterangan:</b> Pesan mengandung tautan/URL aktif\n"
+                "◈ <b>Kebijakan:</b> Pengiriman link tidak diizinkan di grup ini"
+            )
 
-    # External mention (mention user yang bukan anggota grup)
-    # Dicek terakhir karena butuh API call — hanya jika semua kondisi lain tidak cocok
+    # External mention
     if not alasan and cfg.get("anti_mention", True) is True:
         try:
             from plugins.filters.antispam import _is_external_mention
             if await _is_external_mention(client, message):
                 alasan = "Mention Pengguna Luar Grup"
-                detail = "◈ <b>Alasan:</b> Pesan menyebut user yang bukan anggota grup ini"
+                detail = (
+                    "◈ <b>Keterangan:</b> Pesan menyebut user yang bukan anggota grup\n"
+                    "◈ <b>Indikator:</b> Pola mention spam untuk menarik orang luar"
+                )
         except ImportError:
             pass
 
     # Hapus silent — user masih dalam masa mute aktif
-    # Semua cek di atas tidak cocok tapi pesan dihapus → kemungkinan besar user masih kena mute
     if not alasan and cfg.get("local") is True:
         try:
             from database import get_local_mute
             mute_rec = await get_local_mute(cid, uid)
             if mute_rec.get("muted_until", 0.0) > now_ts:
-                alasan = "Hapus Otomatis — User Dalam Masa Mute"
                 until_dt = datetime.fromtimestamp(mute_rec["muted_until"], tz=TZ_WIB)
-                detail = f"◈ <b>Alasan:</b> User masih di-mute hingga {until_dt.strftime('%H:%M:%S WIB')}"
+                alasan = "Hapus Senyap — Masa Mute Aktif"
+                detail = (
+                    f"◈ <b>Keterangan:</b> User masih di-mute, pesan otomatis dihapus\n"
+                    f"◈ <b>Mute berakhir:</b> {until_dt.strftime('%H:%M:%S WIB')}"
+                )
         except Exception:
             pass
 
     if not alasan:
         return
 
+    # ── Peta ikon per jenis pelanggaran ──────────────────────────────────────
     icon_map = {
-        "Filter Owner — Regex Global":         "🚫",
-        "Filter Kata — Regex Grup":            "🚫",
-        "Anti-Spam Duplikasi Lokal":           "🔁",
-        "Anti-Broadcast Gcast Global":         "🌐",
-        "Bio Link Detector":                   "🔍",
-        "Link Detector":                       "🔗",
-        "Mention Pengguna Luar Grup":          "👤",
-        "Hapus Otomatis — User Dalam Masa Mute": "🔇",
+        "Filter Regex Global":              "🚫",
+        "Filter Regex Grup":               "🔡",
+        "Anti-Spam Duplikat Lokal":        "🔁",
+        "Anti-Broadcast Gcast Global":     "🌐",
+        "Bio Link Detector":               "🔍",
+        "Link Detector":                   "🔗",
+        "Mention Pengguna Luar Grup":      "👤",
+        "Hapus Senyap — Masa Mute Aktif":  "🔇",
     }
     icon         = icon_map.get(alasan, "⚠️")
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
+    user_mention = _user_line(uid, message.from_user.first_name)
 
     log_text = (
-        "<b>❖ ANTI-SPAM — PESAN DIHAPUS ❖</b>\n"
-        f"{icon} <b>Pesan Dieliminasi Otomatis</b>\n"
+        f"<b>❖ HAPUS OTOMATIS — {alasan.upper()} ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"{icon} <b>Tipe:</b> {alasan}\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
-        f"◈ <b>Tipe:</b> <code>{alasan}</code>\n"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
         f"{detail}\n\n"
-        f"<b>Konten:</b> <code>{content[:500]}</code>"
+        f"📨 <b>Konten:</b>\n<code>{content[:500]}</code>"
         "</blockquote>"
     )
     await _send_log(client, log_text)
 
 
-# ── INTEGRASI NEXUS: Fungsi log untuk nexus_group.py ─────────────────────────
+# ── INTEGRASI NEXUS ───────────────────────────────────────────────────────────
 
 async def log_spam_global(client: Client, message: Message, pola: str, indikator: str):
     """Dipanggil oleh Nexus Engine untuk log pelanggaran GLOBAL."""
     uid          = message.from_user.id
     cid          = message.chat.id
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
-    waktu        = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
+    user_mention = _user_line(uid, message.from_user.first_name)
 
     log_text = (
-        "<b>❖ NEXUS AI — FILTER GLOBAL ❖</b>\n"
-        "🌐 <b>Pesan Dihapus — Deteksi AI Global</b>\n"
+        "<b>❖ HAPUS OTOMATIS — NEXUS AI GLOBAL ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"🌐 <b>Tipe:</b> Deteksi AI Global\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
-        f"◈ <b>Indikator:</b> <code>{indikator}</code>\n"
-        f"◈ <b>Pola:</b> <code>{pola[:80]}</code>"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
+        f"◈ <b>Keterangan:</b> Model AI mendeteksi pola spam lintas grup\n"
+        f"◈ <b>Indikator AI:</b> <code>{indikator}</code>\n"
+        f"◈ <b>Pola terdeteksi:</b> <code>{pola[:80]}</code>"
         "</blockquote>"
     )
     await _send_log(client, log_text)
@@ -448,18 +442,18 @@ async def log_spam_lokal(client: Client, message: Message, pola: str, indikator:
     """Dipanggil oleh Nexus Engine untuk log pelanggaran LOKAL (Owner)."""
     uid          = message.from_user.id
     cid          = message.chat.id
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
-    waktu        = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
+    user_mention = _user_line(uid, message.from_user.first_name)
 
     log_text = (
-        "<b>❖ NEXUS AI — FILTER OWNER ❖</b>\n"
-        "⚙️ <b>Pesan Dihapus — Filter Manual Owner</b>\n"
+        "<b>❖ HAPUS OTOMATIS — NEXUS AI OWNER ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"⚙️ <b>Tipe:</b> Filter Manual Owner (Nexus AI)\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
-        f"◈ <b>Indikator:</b> <code>{indikator}</code>\n"
-        f"◈ <b>Pola:</b> <code>{pola[:80]}</code>"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
+        f"◈ <b>Keterangan:</b> Cocok dengan filter kata yang diset owner\n"
+        f"◈ <b>Indikator AI:</b> <code>{indikator}</code>\n"
+        f"◈ <b>Pola terdeteksi:</b> <code>{pola[:80]}</code>"
         "</blockquote>"
     )
     await _send_log(client, log_text)
@@ -467,12 +461,10 @@ async def log_spam_lokal(client: Client, message: Message, pola: str, indikator:
 
 async def log_sistem(client: Client, judul: str, pesan: str):
     """Log notifikasi sistem ke channel."""
-    waktu    = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
     log_text = (
-        f"<b>❖ SYSTEM ALERT ❖</b>\n"
-        f"⚡ <b>{judul}</b>\n"
+        f"<b>❖ SISTEM — {judul.upper()} ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>Waktu:</b> {waktu}\n"
+        f"⚡ <b>Waktu:</b> {_fmt_waktu()}\n"
         f"{pesan}"
         "</blockquote>"
     )
