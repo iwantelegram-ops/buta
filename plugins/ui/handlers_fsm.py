@@ -34,7 +34,7 @@ from plugins.ui.fsm_state import (
     pending_bio_vip_state,
     clear_all_fsm, _cancel_task,
 )
-from core.regex_utils import _build_group_interlock, generate_kandidat_mutasi_liar, pipeline_pembersihan
+from core.regex_utils import _build_group_interlock
 import admin_session as _adm_sess
 
 group_regex_db = db["regex_per_group"]
@@ -159,22 +159,21 @@ async def handle_fsm_input(client, message: Message):
 #  Handler regex FSM
 # ─────────────────────────────────────────────────────────────────────────────
 async def _handle_regex_input(client, message: Message, user_id: int, state: dict):
-    # Simpan raw_asli dengan kapital utuh — JANGAN .lower() di sini
-    # karena kapital dari owner dipakai sebagai penanda posisi wajib di generator
-    raw_asli = unicodedata.normalize("NFKC", message.text.strip())
-    raw      = raw_asli.lower()  # versi lowercase hanya untuk _build_group_interlock
-    chat_id  = state["chat_id"]
-    msg_id   = state["msg_id"]
+    # Identik dengan owner FSM: normalize NFKC, JANGAN lowercase
+    # Kapital dari input dipakai generate_kandidat_mutasi_liar sebagai posisi wajib
+    raw_input = unicodedata.normalize("NFKC", message.text.strip())
+    chat_id   = state["chat_id"]
+    msg_id    = state["msg_id"]
 
     _cancel_task(pending_regex_state.pop(user_id, None))
 
     try:
-        pola, kata_list = _build_group_interlock(raw)
+        pola, mutasi_display, _ = _build_group_interlock(raw_input)
         re.compile(pola)
     except (ValueError, re.error) as e:
         err = await message.reply(
             f"❌ <b>ERROR</b>\n\n"
-            f"Input tidak dikenali:\n<code>{raw}</code>\n"
+            f"Input tidak dikenali:\n<code>{raw_input}</code>\n"
             f"<b>Keterangan:</b> <code>{e}</code>\n\n"
             f"<i>Contoh: <code>togel</code> atau <code>jual | akun</code></i>",
             parse_mode=ParseMode.HTML,
@@ -187,22 +186,12 @@ async def _handle_regex_input(client, message: Message, user_id: int, state: dic
             pass
         return
 
-    raw_display = " | ".join(kata_list) if kata_list else raw
-
-    # Pisahkan kata dari raw_asli agar kapital tetap terjaga
-    # raw_asli bisa "bAkSo | lonTOng" → split | → ["bAkSo", "lonTOng"]
-    kata_asli_list = [k.strip() for k in raw_asli.split("|") if k.strip()]
-
-    mutasi_map: dict = {}
-    for i, kata in enumerate(kata_list):
-        # Ambil versi asli (dengan kapital) jika tersedia
-        kata_dengan_kapital = kata_asli_list[i] if i < len(kata_asli_list) else kata
-        # Bersihkan simbol tapi JANGAN lowercase — kapital harus sampai ke generator
-        import re as _re
-        kata_bersih_asli = _re.sub(r"\(?[×xX]\d+\)?", "", kata_dengan_kapital)
-        kata_bersih_asli = _re.sub(r"[^\w]", "", kata_bersih_asli).strip().split()[0] if kata_bersih_asli.strip() else ""
-        if kata_bersih_asli:
-            mutasi_map[kata] = generate_kandidat_mutasi_liar(kata_bersih_asli)
+    # mutasi_display dari _build_group_interlock sudah identik dengan owner:
+    # list[tuple[str, list[str]]] → (kata_lowercase, mutasi_list)
+    # mutasi_map KONSISTEN dengan pola — tidak perlu re-generate manual
+    kata_list   = [k for k, _ in mutasi_display]
+    mutasi_map  = {k: m for k, m in mutasi_display}
+    raw_display = " | ".join(kata_list) if kata_list else raw_input
 
     await group_regex_db.update_one(
         {"chat_id": chat_id, "pattern": pola},
@@ -225,7 +214,7 @@ async def _handle_regex_input(client, message: Message, user_id: int, state: dic
     invalidate_count_cache(chat_id)  # refresh jumlah filter di panel
 
     text, keyboard = await page_regex_list(chat_id, 1)
-    kata_str = " + ".join(f"<code>{k}</code>" for k in kata_list) if kata_list else f"<code>{raw}</code>"
+    kata_str = " + ".join(f"<code>{k}</code>" for k in kata_list) if kata_list else f"<code>{raw_input}</code>"
     header = (
         f"✅ <b>Filter Kata Berhasil Ditambahkan!</b>\n"
         f"◈ <b>Kata Kunci:</b> {kata_str}\n"
