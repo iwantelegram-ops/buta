@@ -206,12 +206,34 @@ async def _process_detection(client: "Client", message: "Message") -> None:
     if is_message_handled(cid, mid):
         return
 
+    # ── Cek izin bot (diulang di sini karena pesan mungkin sudah antre lama) ─
+    # Jika bot tidak punya delete_messages DAN restrict_members → skip seluruhnya.
+    from database import check_bot_permissions
+    if not await check_bot_permissions(client, cid):
+        return
+
     content = (message.text or message.caption or "").strip()
     if not content or content.startswith("/"):
         return
 
     is_short         = (1 <= len(content) <= 3) or content.isdigit()
     cfg              = await get_config(cid)
+
+    # ── VIP Bio: integrasi dengan bio.py ──────────────────────────────────────
+    # Jika bio_check aktif DAN bio_vip_text diset, cek apakah user ini VIP bio.
+    # Pemanggilan _check_vip_bio membaca koleksi bio_profiles yang SUDAH diisi
+    # oleh bot pemantau — tidak ada Telegram API tambahan sama sekali.
+    # Bypass dilakukan SEBELUM regex/mention/link check agar user VIP tidak
+    # terkena filter apapun (termasuk regex global/lokal dan link detector).
+    _vip_text = (cfg.get("bio_vip_text") or "").strip()
+    if _vip_text and cfg.get("bio_check"):
+        try:
+            from plugins.filters.bio import _check_vip_bio
+            if await _check_vip_bio(cid, uid, _vip_text):
+                return  # User VIP bio → bypass seluruh filter antispam
+        except Exception as _e:
+            print(f"[antispam_queue] VIP bio check error uid={uid} cid={cid}: {_e}")
+
     now_ts           = _time.time()
     now_dt           = datetime.now(TZ_WIB)
     norm             = simplify(content)
