@@ -807,6 +807,7 @@ nexus_whitelist_db = db["nexus_whitelist"]
 nexus_actlog_db    = db["nexus_actlog"]
 group_action_log_db = db["group_action_log"]
 bot_config_db      = db["bot_config"]
+mention_cache_db   = db["mention_member_cache"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1168,6 +1169,7 @@ async def setup_db():
             "local_mute", "group_action_log",
             "nexus_actlog", "ai_debug_log", "dm_users", "nexus_ai_model", "bot_config",
             "security_os", "security_os_monitors",
+            "mention_member_cache",
         ]:
             await _ensure_table(conn, _ns(col_name))
 
@@ -2961,3 +2963,173 @@ async def ns_remove_score(chat_id: int, user_id: int) -> None:
     except Exception as e:
         print(f"[NewsCore] remove_score error: {e}")
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MENTION MEMBER CACHE
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Menyimpan hasil get_chat_member per (chat_id, user_id/username) agar
+# deteksi external mention tidak perlu hit Telegram API setiap saat.
+#
+# Schema dokumen:
+#   chat_id    : int          — ID grup
+#   user_id    : int          — ID user (tidak pernah berubah)
+#   username   : str | None   — @username saat di-cache (bisa berubah)
+#   is_member  : bool         — True = member grup ini
+#   cached_at  : float        — unix timestamp saat data disimpan
+#   expires_at : datetime     — TTL 1 minggu, diperbarui tiap ada mention
+#
+# Index:
+#   unik  (chat_id, user_id)   — lookup by user_id
+#   biasa (chat_id, username)  — lookup by username string
+#   TTL   expires_at           — MongoDB hapus otomatis setelah 1 minggu
+#
+# username dan user_id keduanya disimpan karena berbeda:
+#   - user_id stabil → cocok untuk TEXT_MENTION / tg://user?id=
+#   - username bisa berubah → disimpan apa adanya saat di-cache
+#   Jika user ganti username, entry lama (username lama) tetap ada sampai
+#   TTL habis. Entry baru (username baru) dibuat saat mention berikutnya.
+#   Ini aman karena worst case hanya false negative (miss cache → API call),
+#   bukan false positive (member asli dikira external).
+
+MENTION_CACHE_TTL_SECS = 7 * 24 * 3600   # 1 minggu
+
+_mention_ttl_index_created = False
+
+
+async def ensure_mention_cache_index() -> None:
+    """
+    Buat TTL index pada expires_at di mention_member_cache.
+    Idempotent — aman dipanggil tiap startup.
+    """
+    global _mention_ttl_index_created
+    if _mention_ttl_index_created:
+        return
+    if _BACKEND != "mongo":
+        _mention_ttl_index_created = True
+        return
+    try:
+        await mention_cache_db.create_index("expires_at", expireAfterSeconds=0)
+        await mention_cache_db.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
+        await mention_cache_db.create_index([("chat_id", 1), ("username", 1)])
+        _mention_ttl_index_created = True
+        print("[MentionCache] ✅ TTL index mention_member_cache siap.")
+    except Exception as e:
+        print(f"[MentionCache] ⚠️  Gagal buat index: {e}")
+
+
+def _mention_expires_at() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(seconds=MENTION_CACHE_TTL_SECS)
+
+
+async def mention_cache_get_by_username(chat_id: int, username: str) -> "bool | None":
+    """
+    Cari di cache berdasarkan username (lowercase, tanpa @).
+    Return: True = member, False = bukan member, None = tidak ada di cache.
+    """
+    try:
+        doc = await mention_cache_db.find_one({
+            "chat_id": chat_id,
+            "username": username.lower(),
+        })
+        if doc is None:
+            return None
+        return doc.get("is_member", False)
+    except Exception as e:
+        print(f"[MentionCache] get_by_username error: {e}")
+        return None
+
+
+async def mention_cache_get_by_uid(chat_id: int, user_id: int) -> "bool | None":
+    """
+    Cari di cache berdasarkan user_id.
+    Return: True = member, False = bukan member, None = tidak ada di cache.
+    """
+    try:
+        doc = await mention_cache_db.find_one({
+            "chat_id": chat_id,
+            "user_id": user_id,
+        })
+        if doc is None:
+            return None
+        return doc.get("is_member", False)
+    except Exception as e:
+        print(f"[MentionCache] get_by_uid error: {e}")
+        return None
+
+
+async def mention_cache_set(
+    chat_id: int,
+    user_id: int,
+    is_member: bool,
+    username: "str | None" = None,
+) -> None:
+    """
+    Simpan / perbarui cache hasil member check.
+    TTL diperbarui ke 1 minggu dari sekarang setiap dipanggil.
+    username dan user_id keduanya disimpan (bisa berbeda dari waktu ke waktu).
+    """
+    try:
+        now = time.time()
+        await mention_cache_db.update_one(
+            {"chat_id": chat_id, "user_id": user_id},
+            {"$set": {
+                "chat_id":    chat_id,
+                "user_id":    user_id,
+                "username":   username.lower() if username else None,
+                "is_member":  is_member,
+                "cached_at":  now,
+                "expires_at": _mention_expires_at(),
+            }},
+            upsert=True,
+        )
+        # Jika punya username, update juga entry by username
+        # (untuk kasus user_id belum dikenal tapi username dikenal)
+        if username:
+            await mention_cache_db.update_one(
+                {"chat_id": chat_id, "username": username.lower(), "user_id": {"$ne": user_id}},
+                {"$set": {
+                    "chat_id":    chat_id,
+                    "user_id":    user_id,
+                    "username":   username.lower(),
+                    "is_member":  is_member,
+                    "cached_at":  now,
+                    "expires_at": _mention_expires_at(),
+                }},
+                upsert=False,   # hanya update jika ada dokumen username lama yang user_id-nya beda
+            )
+    except Exception as e:
+        print(f"[MentionCache] set error: {e}")
+
+
+async def mention_cache_refresh_ttl(chat_id: int, user_id: int) -> None:
+    """
+    Perbarui expires_at ke 1 minggu lagi tanpa mengubah data lain.
+    Dipanggil saat ada mention dan entry sudah ada di cache (cache hit).
+    """
+    try:
+        await mention_cache_db.update_one(
+            {"chat_id": chat_id, "user_id": user_id},
+            {"$set": {"expires_at": _mention_expires_at()}},
+        )
+    except Exception as e:
+        print(f"[MentionCache] refresh_ttl error: {e}")
+
+
+async def mention_cache_remove_member(chat_id: int, user_id: int) -> None:
+    """
+    Tandai user sebagai bukan member lagi (misal: keluar/kick dari grup).
+    Tidak menghapus dokumen — TTL tetap jalan, tapi is_member = False.
+    """
+    try:
+        await mention_cache_db.update_one(
+            {"chat_id": chat_id, "user_id": user_id},
+            {"$set": {
+                "is_member":  False,
+                "cached_at":  time.time(),
+                "expires_at": _mention_expires_at(),
+            }},
+        )
+    except Exception as e:
+        print(f"[MentionCache] remove_member error: {e}")

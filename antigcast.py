@@ -937,6 +937,13 @@ async def main():
         except Exception as e:
             print(f"[Startup] ⚠️  Gagal load bot pemantau (monitor): {e}", flush=True)
 
+        # ── Mention Member Cache TTL Index ────────────────────────────────────
+        try:
+            from database import ensure_mention_cache_index
+            await ensure_mention_cache_index()
+        except Exception as e:
+            print(f"[Startup] ⚠️  Gagal buat mention cache index: {e}", flush=True)
+
         print("🚀 Bot Antispam + Nexus AI aktif! Tekan Ctrl+C untuk berhenti.", flush=True)
         await idle()
     except (KeyboardInterrupt, asyncio.CancelledError):
