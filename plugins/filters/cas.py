@@ -29,7 +29,6 @@ from database import (
     db, auto_delete_reply, is_admin, delete_queue,
     update_config, save_group_title, save_group_username, remove_group_data,
     TZ_WIB, mark_message_handled, insert_group_action_log, get_config,
-    check_bot_permissions,
 )
 from core.group_notify import send_group_notice
 from core.moderation_queue import queue_ban
@@ -143,10 +142,6 @@ async def cas_auto_mod(client: Client, message: Message):
     uid     = message.from_user.id
     cid     = message.chat.id
     mid     = message.id
-
-    # [PATCH]: Menutup mata dan menghemat request HTTP jika tidak ada hak eksekutor.
-    if not await check_bot_permissions(client, cid):
-        return
 
     cfg = await get_config(cid)
     if not cfg.get("cas", False):
@@ -334,4 +329,3 @@ async def handle_chat_title_change(client: Client, message: Message):
             await save_group_title(message.chat.id, message.new_chat_title)
     except Exception as e:
         print(f"[handle_chat_title_change] {e}")
-

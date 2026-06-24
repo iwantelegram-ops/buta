@@ -366,10 +366,6 @@ async def bio_typing_handler(client: Client, update, users, chats):
         if not chat_id:
             return
 
-        # [PATCH]: Cegah kebocoran resource dengan skip jika tidak ada hak eksekutor.
-        if not await check_bot_permissions(client, chat_id):
-            return
-
         # Throttle: jangan trigger terlalu sering dari bot utama
         now = time.monotonic()
         key = (chat_id, user_id)

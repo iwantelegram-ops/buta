@@ -305,10 +305,6 @@ async def _clean_message_tracker(client, message):
     mid = message.id
     uid = message.from_user.id
 
-    # [PATCH]: Menutup mata pada background task ini jika bot tak berizin di grup.
-    if not await check_bot_permissions(client, cid):
-        return
-
     if not is_message_handled(cid, mid):
         asyncio.create_task(_reset_mute_async(cid, uid))
 
