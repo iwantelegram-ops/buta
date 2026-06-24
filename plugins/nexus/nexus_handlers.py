@@ -95,6 +95,9 @@ async def _welcome_text() -> str:
     total_regex    = await nexus_get_regex_count()
     owner_regex_ct = await get_owner_regex_count()
     wl_ct          = await nexus_whitelist_count()
+    from database import get_bot_config
+    auto_gen_on = await get_bot_config("nexus_auto_gen_enabled", default=True)
+    auto_gen_label = "✅ Aktif" if auto_gen_on is not False else "⏸️ Dimatikan"
     return (
         "🤖 **NEXUS AI ENGINE**\n"
         "_Adaptive Regex Engine · Belajar dari Laporan Spam_\n"
@@ -108,7 +111,8 @@ async def _welcome_text() -> str:
         f"├─ 🔮 `Pola AI (Auto)`      : **{total_regex} interlock regex**\n"
         f"├─ ⚙️ `Pola Manual (Owner)` : **{owner_regex_ct} regex**\n"
         f"├─ 🛡️ `Whitelist Nexus`     : **{wl_ct} pengecualian**\n"
-        "└─ 🕛 `Siklus Rekalkulasi`   : **Setiap 00:00 WIB**\n"
+        f"├─ 🕛 `Siklus Rekalkulasi`   : **Setiap 00:00 WIB**\n"
+        f"└─ 🔄 `Auto-Generate`        : **{auto_gen_label}**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "_Engine berjalan otomatis. Pilih panel di bawah:_"
     )
@@ -911,6 +915,9 @@ async def nexus_callback_router(client: Client, cq: CallbackQuery):
             await cq.answer()
         except Exception:
             pass
+        from database import get_bot_config
+        auto_gen_on = await get_bot_config("nexus_auto_gen_enabled", default=True)
+        auto_gen_label = "🔄 Auto-Gen: ✅ ON" if auto_gen_on is not False else "🔄 Auto-Gen: ⏸️ OFF"
         await _safe_edit(
             cq.message,
             "👑 **PANEL KHUSUS OWNER BOT**\n"
@@ -933,6 +940,7 @@ async def nexus_callback_router(client: Client, cq: CallbackQuery):
                     InlineKeyboardButton("🔬  Debug AI (24j)",  callback_data="nx_ai_debug_page_1"),
                     InlineKeyboardButton("🗑️  Reset Integrasi", callback_data="nx_menu_reset"),
                 ],
+                [InlineKeyboardButton(auto_gen_label,            callback_data="nx_toggle_autogen")],
                 [InlineKeyboardButton("📱  Ganti Userbot",       callback_data="nx_setuserbot")],
                 [InlineKeyboardButton("🔙  Kembali ke Nexus",   callback_data="nx_home")],
             ])
@@ -994,6 +1002,53 @@ async def nexus_callback_router(client: Client, cq: CallbackQuery):
         )
         if user_id in _pending_setuserbot:
             _pending_setuserbot[user_id]["_task"] = task
+
+    elif data == "nx_toggle_autogen":
+        if user_id != OWNER_ID:
+            try:
+                await cq.answer("🔒 Hanya Owner bot.", show_alert=True)
+            except Exception:
+                pass
+            return
+        from database import get_bot_config, save_bot_config
+        current = await get_bot_config("nexus_auto_gen_enabled", default=True)
+        # Toggle: kalau sekarang True/None → matikan (False), kalau False → nyalakan (True)
+        new_val = False if current is not False else True
+        await save_bot_config("nexus_auto_gen_enabled", new_val)
+        label   = "✅ DINYALAKAN" if new_val else "⏸️ DIMATIKAN"
+        try:
+            await cq.answer(f"Auto-Generate {label}", show_alert=True)
+        except Exception:
+            pass
+        # Refresh owner panel supaya label tombol langsung berubah
+        auto_gen_label = "🔄 Auto-Gen: ✅ ON" if new_val else "🔄 Auto-Gen: ⏸️ OFF"
+        await _safe_edit(
+            cq.message,
+            "👑 **PANEL KHUSUS OWNER BOT**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Akses kontrol penuh ke dalam core system Nexus AI.",
+            InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📊  Record Data",      callback_data="nx_records_page_1"),
+                    InlineKeyboardButton("📂  Grup Terdaftar",   callback_data="nx_list_grup"),
+                ],
+                [
+                    InlineKeyboardButton("⚡  Paksa Kalkulasi",  callback_data="nx_force_calc"),
+                    InlineKeyboardButton("🔄  Refresh Metrik",   callback_data="nx_refresh"),
+                ],
+                [
+                    InlineKeyboardButton("🧠  Lihat AI",         callback_data="nx_lihat_ai"),
+                    InlineKeyboardButton("📋  Log Aktivitas",    callback_data="nx_actlog_page_1"),
+                ],
+                [
+                    InlineKeyboardButton("🔬  Debug AI (24j)",  callback_data="nx_ai_debug_page_1"),
+                    InlineKeyboardButton("🗑️  Reset Integrasi", callback_data="nx_menu_reset"),
+                ],
+                [InlineKeyboardButton(auto_gen_label,            callback_data="nx_toggle_autogen")],
+                [InlineKeyboardButton("📱  Ganti Userbot",       callback_data="nx_setuserbot")],
+                [InlineKeyboardButton("🔙  Kembali ke Nexus",   callback_data="nx_home")],
+            ])
+        )
 
     elif data == "nx_list_grup":
         if user_id != OWNER_ID:

@@ -98,11 +98,18 @@ async def generate_regex_otomatis_async():
 
 async def cron_midnight_scheduler(client=None):
     """Jalankan sebagai asyncio.create_task() saat bot start."""
+    from database import get_bot_config
     try:
         while True:
             now = datetime.now(TZ_JAKARTA)
             if now.hour == 0 and now.minute == 0:
-                await generate_regex_otomatis_async()
+                # Cek toggle — default True (aktif) jika belum pernah diset
+                enabled = await get_bot_config("nexus_auto_gen_enabled", default=True)
+                if enabled is False:
+                    ts = datetime.now(TZ_JAKARTA).strftime("%H:%M:%S")
+                    print(f"[{ts}] ⏸️  [Nexus] Auto-generate DIMATIKAN via toggle — skip kalkulasi malam ini.")
+                else:
+                    await generate_regex_otomatis_async()
                 await asyncio.sleep(60)
             await asyncio.sleep(30)
 
