@@ -413,6 +413,11 @@ async def _rewarm_known_peers(client) -> None:
             _ch_id = int(os.environ.get(_env_key, 0))
             if _ch_id:
                 peer_ids.add(_ch_id)
+                # Baca username yang disimpan saat startup sebelumnya
+                from database import get_bot_config as _gcfg
+                _uname = await _gcfg(f"{_env_key.lower()}_username")
+                if _uname and _ch_id not in username_map:
+                    username_map[_ch_id] = f"@{_uname.lstrip('@')}"
         except Exception:
             pass
 
