@@ -12,11 +12,11 @@ ARSITEKTUR:
   ┌────────────────────────────────────────────────────────────────────┐
   │  monitor_bot_reference.py (proses ini)                             │
   │                                                                    │
-  │   MonitorInstance(chat_id=grupA, token=tokenA)  ← pantau grupA      │
-  │   MonitorInstance(chat_id=grupB, token=tokenB)  ← pantau grupB      │
-  │   MonitorInstance(chat_id=grupC, token=tokenC)  ← pantau grupC      │
+  │   MonitorInstance(chat_id=grupA, token=tokenA)  ← pantau grupA    │
+  │   MonitorInstance(chat_id=grupB, token=tokenB)  ← pantau grupB    │
+  │   MonitorInstance(chat_id=grupC, token=tokenC)  ← pantau grupC    │
   │                                                                    │
-  │   Semua tulis ke collection bio_profiles dengan field chat_id      │
+  │   Semua tulis ke collection bio_profiles dengan field chat_id     │
   └──────────────────────────────┬─────────────────────────────────────┘
                                  │ DB bersama (MongoDB)
               ┌──────────────────┴──────────────────┐
@@ -35,7 +35,7 @@ COLLECTION bio_profiles:
     bio        : str,    # isi bio saat dicek
     checked_at : float,  # unix timestamp terakhir dicek
     updated_at : float,  # unix timestamp terakhir berubah status
-    expires_at : datetime, # TTL — dokumen otomatis dihapus MongoDB setelah 5 menit
+    expires_at : datetime, # TTL — dokumen otomatis dihapus MongoDB setelah N detik
   }
   Index unik: (chat_id, user_id)
   Index TTL : expires_at (expireAfterSeconds=0) → MongoDB hapus otomatis
@@ -47,17 +47,39 @@ FLOW TOKEN:
   4. Bot utama panggil reload_monitor_instances() (fungsi di file ini)
   5. File ini spawn MonitorInstance baru untuk token/grup tersebut
 
+STRATEGI CACHE (upgrade anti-FloodWait):
+  Semua fetch GetFullUser HANYA dilakukan oleh bot pemantau via _bio_worker
+  (antrian rate-limit, 1 request per _BIO_QUEUE_DELAY detik per instance).
+
+  Trigger TYPING tidak lagi langsung fetch — hanya catat user ke
+  _recent_active. Background worker _cache_fill_worker mengisi cache
+  secara pelan (BIO_FILL_DELAY_SECS per user, default 3 detik) sehingga
+  burst typing dari banyak user tidak menyebabkan burst GetFullUser.
+
+  TTL di-jitter ±BIO_TTL_JITTER_SECS per instance agar expires antar grup
+  tidak barengan dan menimbulkan lonjakan fetch bersamaan.
+
+  Fetch langsung ke API (via _enqueue_bio_check) hanya terjadi untuk:
+    1. User JOIN grup (force=True, sekali per join)
+    2. User NAIK VC  (force=True, throttle VC_JOIN_RECHECK_SECS)
+    3. User KIRIM PESAN pertama kali / cache sudah expired (force=False
+       tapi _cache_fill_worker yang enqueue, bukan handler pesan)
+    4. User perubahan profil terdeteksi (UpdateUserName/Photo)
+    5. force_check_user dari bio.py: HANYA jika cache benar-benar kosong
+       (None dari DB), lewat antrian yang sama — tidak bypass queue
+
 VARIABEL .env:
   API_ID, API_HASH   — sama dengan bot utama
   MONGO_URL          — HARUS SAMA dengan bot utama (DB bersama)
   MONGO_DB_NAME      — HARUS SAMA dengan bot utama
   CODE_BOT           — HARUS SAMA dengan bot utama
-  BIO_TTL_SECS           — TTL data bio di DB sebelum dihapus (default: 300 detik).
-                            Semua throttle in-memory (BIO_RECHECK_SECS,
-                            VC_JOIN_RECHECK_SECS, TYPING_RECHECK_SECS) serta
-                            cache di bio.py dan video_call.py ikut nilai ini
-                            secara default — ubah satu env var ini cukup untuk
-                            menyamakan seluruh lapisan cache/TTL bio di sistem.
+  BIO_TTL_SECS       — TTL data bio di DB (default: 300 detik / 5 menit)
+  BIO_RECHECK_SECS   — throttle minimum antar re-fetch (default = BIO_TTL_SECS)
+  VC_JOIN_RECHECK_SECS — throttle re-fetch saat naik VC (default = BIO_TTL_SECS)
+  BIO_QUEUE_DELAY    — jeda antar GetFullUser dalam worker (default: 1.5 detik)
+  BIO_FILL_DELAY_SECS — jeda antar fetch di background fill loop (default: 3 detik)
+  BIO_TTL_JITTER_SECS — random ±N detik pada TTL per instance (default: 60 detik)
+  BIO_ACTIVE_WINDOW_SECS — window "user aktif" untuk fill loop (default: 2×TTL)
 """
 
 from __future__ import annotations
@@ -65,6 +87,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import random
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -82,27 +105,33 @@ from pyrogram.errors import FloodWait, PeerIdInvalid, ChatAdminRequired
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", override=False)
 
 # ── Env ───────────────────────────────────────────────────────────────────────
-API_ID    = int(os.environ.get("API_ID", 0))
-API_HASH  = os.environ.get("API_HASH", "")
+API_ID   = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
 
-# TTL data bio di MongoDB — dokumen dihapus otomatis setelah N detik (default 60)
+# TTL data bio di MongoDB — dokumen dihapus otomatis setelah N detik (default 300)
 BIO_TTL_SECS = int(os.environ.get("BIO_TTL_SECS", 300))
 
-# FIX: Semua throttle in-memory di bawah ini SEBELUMNYA punya default sendiri
-# yang jauh lebih besar dari BIO_TTL_SECS (600 & 300 detik vs TTL 60 detik).
-# Akibatnya: dokumen bio sudah dihapus MongoDB (sesuai TTL), tapi throttle
-# in-memory _last_checked / _last_typing_checked masih menganggap "baru saja
-# dicek" sehingga check_and_save(force=False) SKIP fetch ulang ke Telegram API
-# dan mengembalikan None / data DB basi — bio yang sudah dibersihkan user
-# tetap dianggap "ada link" sampai throttle lama itu habis (bisa 5-10 menit).
-# Sekarang semua throttle ini default-nya MENGIKUTI BIO_TTL_SECS, supaya satu
-# env var BIO_TTL_SECS mengatur seluruh lapisan cache secara konsisten.
-# Tetap bisa di-override individual lewat env var masing-masing jika perlu.
-BIO_RECHECK_SECS      = int(os.environ.get("BIO_RECHECK_SECS", BIO_TTL_SECS))
-
-# ── Throttle khusus per skenario ──────────────────────────────────────────────
+# Throttle minimum antar re-fetch — default mengikuti BIO_TTL_SECS.
+# Ubah BIO_TTL_SECS saja sudah cukup untuk mengatur seluruh lapisan cache.
+BIO_RECHECK_SECS     = int(os.environ.get("BIO_RECHECK_SECS", BIO_TTL_SECS))
 VC_JOIN_RECHECK_SECS = int(os.environ.get("VC_JOIN_RECHECK_SECS", BIO_TTL_SECS))
-TYPING_RECHECK_SECS  = int(os.environ.get("TYPING_RECHECK_SECS", BIO_TTL_SECS))
+
+# ── Rate-limit & fill-loop config ─────────────────────────────────────────────
+# Jeda antar GetFullUser dalam _bio_worker (per instance).
+# 1.5 detik → maks ~40 req/menit per token, aman untuk grup ramai.
+# Naikkan jika masih kena FloodWait, turunkan jika mau lebih responsif.
+_BIO_QUEUE_DELAY = float(os.environ.get("BIO_QUEUE_DELAY", 1.5))
+
+# Jeda antar fetch di _cache_fill_worker (background loop per instance).
+# 3 detik default — lebih lambat dari _bio_worker karena tidak mendesak.
+_BIO_FILL_DELAY = float(os.environ.get("BIO_FILL_DELAY_SECS", 3.0))
+
+# Jitter TTL: expires_at = sekarang + BIO_TTL_SECS ± random(0, JITTER)
+# Tiap instance punya offset jitter berbeda agar TTL antar grup tidak barengan.
+_BIO_TTL_JITTER = int(os.environ.get("BIO_TTL_JITTER_SECS", 60))
+
+# Window "user dianggap aktif" untuk fill loop: default 2× TTL.
+_BIO_ACTIVE_WINDOW = int(os.environ.get("BIO_ACTIVE_WINDOW_SECS", BIO_TTL_SECS * 2))
 
 # ── Pola deteksi link di bio ──────────────────────────────────────────────────
 LINK_PATTERN = re.compile(
@@ -132,12 +161,6 @@ _instances_lock = asyncio.Lock()
 # ── Flag: TTL index sudah dibuat ──────────────────────────────────────────────
 _ttl_index_created = False
 
-# ── Rate-limit config untuk bio-check queue ───────────────────────────────────────────────────────────────────────────────────────
-# Jeda minimum antar request GetFullUser PER INSTANCE (bot pemantau per grup).
-# Default 0.5 detik → maks ~120 req/menit per token, aman dari limit Telegram.
-_BIO_QUEUE_DELAY = float(os.environ.get("BIO_QUEUE_DELAY", 0.5))
-
-
 
 async def _ensure_ttl_index() -> None:
     """
@@ -159,11 +182,6 @@ async def _ensure_ttl_index() -> None:
         print(f"[Monitor] ⚠️  Gagal buat TTL index: {e}")
 
 
-def _make_expires_at() -> datetime:
-    """Return datetime UTC kapan dokumen bio harus dihapus (sekarang + BIO_TTL_SECS)."""
-    return datetime.now(timezone.utc) + timedelta(seconds=BIO_TTL_SECS)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # KELAS UTAMA — SATU INSTANCE PER GRUP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,20 +191,37 @@ class MonitorInstance:
     Satu bot pemantau untuk satu grup.
     Punya Pyrogram Client sendiri (token unik per grup).
     Bereaksi terhadap event: pesan masuk, user join, typing, perubahan profil.
+
+    ANTI-FLOODWAIT:
+      Semua GetFullUser melewati _bio_worker (antrian, 1 req per _BIO_QUEUE_DELAY).
+      Typing tidak langsung fetch — hanya catat ke _recent_active.
+      _cache_fill_worker mengisi cache pelan di background untuk user aktif.
+      TTL di-jitter per instance agar expire antar grup tidak barengan.
     """
 
     def __init__(self, chat_id: int, token: str, bot_id: int):
-        self.chat_id    = chat_id
-        self.token      = token
-        self.bot_id     = bot_id
-        self._stopped   = False
-        self._last_checked: dict[int, float] = {}   # user_id → timestamp
+        self.chat_id  = chat_id
+        self.token    = token
+        self.bot_id   = bot_id
+        self._stopped = False
+
+        # Timestamp terakhir fetch berhasil per user (in-memory throttle)
+        self._last_checked: dict[int, float] = {}
+        self._last_vc_checked: dict[int, float] = {}
+
+        # User yang baru-baru ini aktif (typing/kirim pesan) → target fill loop
+        # user_id → last_seen timestamp
+        self._recent_active: dict[int, float] = {}
+
+        # Jitter offset unik per instance (deterministik dari chat_id)
+        # Rentang: 0 s/d _BIO_TTL_JITTER detik — tiap grup punya offset beda
+        self._ttl_jitter_offset: int = abs(chat_id) % max(_BIO_TTL_JITTER, 1)
 
         session_name = f"monitor_{abs(chat_id)}"
         # FIX (pemindahan ke folder security_os/): file .session tetap di ROOT
         # proyek (parent.parent), bukan di dalam security_os/, agar lokasi file
         # session monitor tidak berubah dibanding sebelum pemindahan.
-        self._session_path  = str(Path(__file__).resolve().parent.parent / session_name) + ".session"
+        self._session_path   = str(Path(__file__).resolve().parent.parent / session_name) + ".session"
         self._session_db_key = f"monitor_session_{abs(chat_id)}"
         self.client = Client(
             session_name,
@@ -197,14 +232,29 @@ class MonitorInstance:
 
         self._raw_handler_registered = False
 
-        self._last_vc_checked: dict[int, float] = {}
-        self._last_typing_checked: dict[int, float] = {}
-
-        # ── Bio-check queue: antrian agar request GetFullUser tidak burst ─────
+        # ── Bio-check queue: antrian agar GetFullUser tidak burst ─────────────
         # Item: (user_id, asyncio.Future) — worker proses 1 per 1 + jeda
         self._bio_queue: asyncio.Queue = asyncio.Queue()
         self._bio_queue_pending: set[int] = set()   # dedup: sedang antri/diproses
-        self._bio_worker_task: "Optional[asyncio.Task]" = None
+        self._bio_worker_task: Optional[asyncio.Task] = None
+
+        # ── Background cache fill worker ──────────────────────────────────────
+        self._fill_worker_task: Optional[asyncio.Task] = None
+
+    # ── TTL helper (jitter per instance) ─────────────────────────────────────
+
+    def _make_expires_at(self) -> datetime:
+        """
+        Return datetime UTC kapan dokumen bio harus dihapus.
+        Nilai = sekarang + BIO_TTL_SECS + jitter_offset
+        Jitter deterministik per instance (dari chat_id) — bukan random setiap
+        call — sehingga TTL antar grup konsisten tapi tidak barengan.
+        """
+        return datetime.now(timezone.utc) + timedelta(
+            seconds=BIO_TTL_SECS + self._ttl_jitter_offset
+        )
+
+    # ── Session management ────────────────────────────────────────────────────
 
     async def _restore_session(self) -> None:
         """
@@ -251,17 +301,27 @@ class MonitorInstance:
         except Exception as e:
             print(f"[Monitor {self.chat_id}] ⚠️  Gagal simpan session: {e}")
 
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
     async def start(self) -> bool:
         try:
             await self._restore_session()
             await self.client.start()
             await self._save_session()
             self._register_handlers()
-            # Jalankan bio-check worker (antrian rate-limit aman)
+            # Worker antrian fetch (rate-limit aman)
             self._bio_worker_task = asyncio.create_task(
                 self._bio_worker(), name=f"bio_worker_{abs(self.chat_id)}"
             )
-            print(f"[Monitor {self.chat_id}] ✅ Bot pemantau aktif (bio worker started).")
+            # Background loop pengisi cache pelan untuk user aktif
+            self._fill_worker_task = asyncio.create_task(
+                self._cache_fill_worker(), name=f"fill_worker_{abs(self.chat_id)}"
+            )
+            print(
+                f"[Monitor {self.chat_id}] ✅ Bot pemantau aktif "
+                f"(queue_delay={_BIO_QUEUE_DELAY}s, fill_delay={_BIO_FILL_DELAY}s, "
+                f"ttl_jitter=+{self._ttl_jitter_offset}s)."
+            )
             return True
         except Exception as e:
             print(f"[Monitor {self.chat_id}] ❌ Gagal start: {e}")
@@ -269,15 +329,15 @@ class MonitorInstance:
 
     async def stop(self) -> None:
         self._stopped = True
-        # Hentikan bio worker
-        if self._bio_worker_task and not self._bio_worker_task.done():
-            self._bio_worker_task.cancel()
-            try:
-                await self._bio_worker_task
-            except asyncio.CancelledError:
-                pass
-        # Simpan session terbaru (peer cache yang sempat terbentuk) sebelum
-        # client benar-benar berhenti — kalau ini dipanggil saat SIGTERM/redeploy.
+        # Hentikan kedua worker
+        for task in (self._bio_worker_task, self._fill_worker_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        # Simpan session terbaru sebelum client berhenti
         await self._save_session()
         try:
             if self.client.is_connected:
@@ -285,6 +345,8 @@ class MonitorInstance:
         except Exception:
             pass
         print(f"[Monitor {self.chat_id}] 🛑 Bot pemantau dihentikan.")
+
+    # ── Fetch bio dari Telegram API ───────────────────────────────────────────
 
     async def _fetch_bio(self, user_id: int) -> str | None:
         """
@@ -382,14 +444,15 @@ class MonitorInstance:
         print(f"[Monitor {self.chat_id}] ⚠️  Semua fallback gagal uid={user_id} — bio tidak tersedia")
         return None
 
-
-    # ── Bio-check queue worker ───────────────────────────────────────────────
+    # ── Bio-check queue worker ────────────────────────────────────────────────
 
     async def _bio_worker(self) -> None:
         """
         Worker tunggal per-instance — konsumsi _bio_queue satu per satu.
         Jeda _BIO_QUEUE_DELAY detik antar request untuk menghindari FloodWait
-        saat banyak grup ramai dan force_check_user dipanggil beruntun.
+        saat banyak grup ramai dan banyak user masuk antrian bersamaan.
+
+        Ini adalah SATU-SATUNYA tempat GetFullUser dipanggil.
         """
         while not self._stopped:
             try:
@@ -420,8 +483,13 @@ class MonitorInstance:
     async def _enqueue_bio_check(self, user_id: int) -> "bool | None":
         """
         Masukkan user_id ke antrian bio-check dan tunggu hasilnya.
-        Jika user sudah dalam antrian (dedup), langsung baca DB yang ada
-        daripada antri dua kali.
+        Jika user sudah dalam antrian (dedup via _bio_queue_pending),
+        langsung baca DB yang ada daripada antri dua kali.
+
+        Dipanggil oleh:
+          - check_and_save(force=True)  — join grup, VC, perubahan profil
+          - _cache_fill_worker          — pengisian cache background
+          - force_check_user (via bio.py) — hanya saat cache kosong
         """
         if user_id in self._bio_queue_pending:
             # Sudah antri — kembalikan data DB sementara (tidak menambah antrian)
@@ -443,10 +511,11 @@ class MonitorInstance:
 
     async def _check_and_save_impl(self, user_id: int) -> "bool | None":
         """
-        Implementasi inti check_and_save — hanya dipanggil oleh _bio_worker.
+        Implementasi inti — hanya dipanggil oleh _bio_worker.
         Sudah dijamin tidak burst karena dijalankan satu per satu oleh worker.
+        Menggunakan _make_expires_at() dengan jitter per instance.
         """
-        now = time.time()
+        now      = time.time()
         bio_text = await self._fetch_bio(user_id)
         if bio_text is None:
             return None
@@ -468,7 +537,7 @@ class MonitorInstance:
             if old_has_link != has_link
             else (old_doc.get("updated_at", now) if old_doc else now)
         )
-        expires_at = _make_expires_at()
+        expires_at = self._make_expires_at()   # jitter per instance
 
         await bio_col.update_one(
             {"chat_id": self.chat_id, "user_id": user_id},
@@ -491,23 +560,108 @@ class MonitorInstance:
 
         return has_link
 
+    # ── Background cache fill worker ──────────────────────────────────────────
+
+    async def _cache_fill_worker(self) -> None:
+        """
+        Background loop: isi/refresh cache bio untuk user yang baru-baru ini aktif.
+
+        TUJUAN: Menggantikan peran fetch langsung dari trigger typing.
+          Typing (dan kirim pesan) hanya mencatat user ke _recent_active.
+          Loop ini yang memutuskan kapan fetch dilakukan — secara pelan,
+          satu per satu, dengan jeda _BIO_FILL_DELAY antar user.
+
+        LOGIKA PRIORITAS per iterasi:
+          1. Kumpulkan user aktif dalam _BIO_ACTIVE_WINDOW detik terakhir
+          2. Skip user yang cache-nya masih fresh (>30% TTL tersisa di DB)
+          3. Skip user yang sedang antri di _bio_worker (dedup via _bio_queue_pending)
+          4. Enqueue user sisanya — _bio_worker yang jalankan dengan rate-limit
+
+        Dengan _BIO_FILL_DELAY = 3 detik:
+          - 10 user aktif = 30 detik untuk 1 siklus penuh
+          - Tidak mungkin burst — jauh di bawah limit Telegram
+        """
+        while not self._stopped:
+            try:
+                now        = time.time()
+                candidates = [
+                    uid for uid, last_seen in list(self._recent_active.items())
+                    if now - last_seen < _BIO_ACTIVE_WINDOW
+                ]
+
+                for user_id in candidates:
+                    if self._stopped:
+                        break
+
+                    # Skip jika sedang antri di _bio_worker (dedup)
+                    if user_id in self._bio_queue_pending:
+                        continue
+
+                    # Cek apakah cache masih fresh di DB
+                    try:
+                        doc = await bio_col.find_one(
+                            {"chat_id": self.chat_id, "user_id": user_id}
+                        )
+                    except Exception:
+                        doc = None
+
+                    if doc:
+                        expires = doc.get("expires_at")
+                        if expires:
+                            # Konversi ke timestamp — support naive & aware datetime
+                            if hasattr(expires, "timestamp"):
+                                expires_ts = expires.timestamp()
+                            else:
+                                expires_ts = 0
+                            remaining = expires_ts - time.time()
+                            ttl_total = BIO_TTL_SECS + self._ttl_jitter_offset
+                            # Cache masih fresh jika sisa TTL > 30% total TTL
+                            if remaining > ttl_total * 0.3:
+                                continue
+
+                    # Cache kosong atau akan segera expire → masukkan antrian
+                    # Tidak await hasilnya — fire-and-forget via _bio_worker
+                    if user_id not in self._bio_queue_pending:
+                        loop = asyncio.get_event_loop()
+                        future: asyncio.Future = loop.create_future()
+                        self._bio_queue_pending.add(user_id)
+                        await self._bio_queue.put((user_id, future))
+                        # Buang future — kita tidak perlu hasilnya di sini
+                        future.add_done_callback(lambda _: None)
+
+                    # Jeda antar user agar fill loop tidak burst
+                    await asyncio.sleep(_BIO_FILL_DELAY)
+
+                # Bersihkan _recent_active yang sudah di luar window (hemat memori)
+                cutoff = time.time() - _BIO_ACTIVE_WINDOW
+                stale_uids = [uid for uid, ts in self._recent_active.items() if ts < cutoff]
+                for uid in stale_uids:
+                    self._recent_active.pop(uid, None)
+
+                # Tidur sebelum iterasi berikutnya
+                await asyncio.sleep(max(_BIO_FILL_DELAY, 5.0))
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[Monitor {self.chat_id}] _cache_fill_worker error: {e}")
+                await asyncio.sleep(10.0)
+
+    # ── Public check methods ──────────────────────────────────────────────────
+
     async def check_and_save(
         self, user_id: int, force: bool = False
     ) -> "bool | None":
         """
         Cek bio user, simpan ke bio_profiles dengan chat_id grup ini.
 
-        Setiap kali data disimpan/diperbarui, field expires_at diset ulang
-        ke (sekarang + BIO_TTL_SECS). MongoDB TTL index akan hapus dokumen
-        otomatis setelah waktu tersebut.
-
         Return: True (ada link) | False (tidak) | None (gagal fetch)
-        Throttle: skip jika belum BIO_RECHECK_SECS sejak cek terakhir,
-                  kecuali force=True.
 
-        RATE-LIMIT SAFE: request ke Telegram API dilakukan melalui _bio_worker
-        (antrian per-instance) dengan jeda _BIO_QUEUE_DELAY antar request.
-        Tidak langsung hit API → tidak burst saat banyak grup ramai bersamaan.
+        force=False → baca cache DB jika dalam throttle BIO_RECHECK_SECS.
+        force=True  → enqueue fetch baru via _bio_worker (rate-limit aman).
+
+        RATE-LIMIT SAFE: semua request ke Telegram API lewat _bio_worker
+        (antrian per-instance, jeda _BIO_QUEUE_DELAY). Tidak burst.
         """
         now = time.time()
 
@@ -526,14 +680,14 @@ class MonitorInstance:
     async def check_and_save_vc(self, user_id: int) -> bool | None:
         """
         Paksa re-check bio saat user NAIK KE VOICE CHAT.
-        Cache khusus VC: VC_JOIN_RECHECK_SECS (default 60 detik).
+        Cache khusus VC: VC_JOIN_RECHECK_SECS (default = BIO_TTL_SECS).
 
         BUG 2 FIX: Jika user tidak dikenal bot (tidak ada di DB) meski dalam
         throttle → bypass throttle, paksa fetch fresh dari Telegram API.
         Memastikan user yang baru pertama kali naik VC tetap di-scan.
 
         BUG 3 FIX (timestamp): Jika fetch gagal (result=None), timestamp
-        tidak disimpan → scan berikutnya langsung retry tanpa tunggu 60 detik.
+        tidak disimpan → scan berikutnya langsung retry tanpa tunggu TTL.
         """
         now      = time.time()
         last_vc  = self._last_vc_checked.get(user_id, 0)
@@ -548,11 +702,9 @@ class MonitorInstance:
                 # Data fresh ada di DB → pakai langsung
                 return doc.get("has_link", False)
             # BUG 2 FIX: Tidak ada di DB meski dalam throttle → bypass, fetch fresh
-            # User belum pernah typing → bot belum kenal → harus paksa cek
 
         result = await self.check_and_save(user_id, force=True)
-        # BUG 3 FIX: Simpan timestamp HANYA jika fetch berhasil (result is not None)
-        # Jika gagal → tidak simpan timestamp → scan berikutnya langsung retry
+        # BUG 3 FIX: Simpan timestamp HANYA jika fetch berhasil
         if result is not None:
             self._last_vc_checked[user_id] = now
             self._last_checked[user_id]    = now
@@ -564,46 +716,47 @@ class MonitorInstance:
 
     async def check_and_save_typing(self, user_id: int) -> bool | None:
         """
-        Re-check bio saat user TYPING di grup.
+        Handler typing: TIDAK langsung fetch ke Telegram API.
 
-        Throttle ketat (TYPING_RECHECK_SECS, default 300 detik = 5 menit).
-        Jika sudah dicek dalam 5 menit → kembalikan data DB.
-        Jika lebih dari 5 menit → fetch fresh dari Telegram API.
+        Perubahan vs versi lama:
+          Versi lama: typing → force fetch GetFullUser setiap TYPING_RECHECK_SECS
+          Versi baru: typing → catat ke _recent_active → _cache_fill_worker
+                      yang isi cache secara pelan di background.
+
+        Ini menghilangkan burst GetFullUser saat banyak user typing bersamaan
+        di grup ramai (penyebab utama FloodWait yang dilaporkan).
+
+        Return: data dari cache DB (baca langsung, tidak fetch baru).
         """
-        now          = time.time()
-        last_typing  = self._last_typing_checked.get(user_id, 0)
-        last_general = self._last_checked.get(user_id, 0)
-        last_any     = max(last_typing, last_general)
+        # Catat sebagai aktif → _cache_fill_worker yang jadwalkan fetch
+        self._recent_active[user_id] = time.time()
 
-        if now - last_any < TYPING_RECHECK_SECS:
-            doc = await bio_col.find_one(
-                {"chat_id": self.chat_id, "user_id": user_id}
-            )
-            return doc.get("has_link", False) if doc else None
-
-        self._last_typing_checked[user_id] = now
-        self._last_checked[user_id]        = now
-        result = await self.check_and_save(user_id, force=True)
-        print(
-            f"[Monitor {self.chat_id}] Typing uid={user_id} "
-            f"→ bio fresh, has_link={result}"
-        )
-        return result
+        # Baca dari cache DB — tidak hit API
+        try:
+            doc = await bio_col.find_one({"chat_id": self.chat_id, "user_id": user_id})
+        except Exception:
+            doc = None
+        return doc.get("has_link", False) if doc else None
 
     def _register_handlers(self) -> None:
         """Daftarkan handler Pyrogram ke client instance ini."""
         chat_id = self.chat_id
         monitor = self
 
-        # ── User KIRIM PESAN di grup → cek bio (throttle BIO_RECHECK_SECS) ────
+        # ── User KIRIM PESAN di grup ──────────────────────────────────────────
+        # Catat ke _recent_active (fill loop yang refresh cache).
+        # force=False: baca cache dulu, enqueue hanya jika sudah expired.
         @self.client.on_message(filters.chat(chat_id) & filters.group)
         async def _on_message(client: Client, message: Message):
             user = message.from_user
             if user is None or user.is_bot:
                 return
+            # Catat sebagai aktif untuk fill loop
+            monitor._recent_active[user.id] = time.time()
+            # Cek throttle — hanya enqueue jika cache expired
             await monitor.check_and_save(user.id, force=False)
 
-        # ── User JOIN grup → cek bio (force) ─────────────────────────────────
+        # ── User JOIN grup → cek bio (force, sekali per join) ─────────────────
         @self.client.on_chat_member_updated()
         async def _on_join(client: Client, upd: ChatMemberUpdated):
             if upd.chat.id != chat_id:
@@ -627,8 +780,7 @@ class MonitorInstance:
                 if isinstance(update, raw_types.UpdateUserTyping):
                     user_id = getattr(update, "user_id", None)
                     if user_id and isinstance(user_id, int) and user_id > 0:
-                        # Proses user yang sudah dikenal di grup ini,
-                        # ATAU langsung check_and_save (tidak ada data = fresh check)
+                        # Hanya catat + baca cache — TIDAK fetch API
                         await monitor.check_and_save_typing(user_id)
                     return
 
@@ -788,16 +940,15 @@ async def force_check_user(chat_id: int, user_id: int) -> bool | None:
     """
     Paksa re-check bio user via MonitorInstance aktif untuk grup ini.
 
-    Dipanggil oleh bio.py saat:
-      - Data belum ada di DB (None) → cek fresh
-      - Bot utama terima pesan dari user yang belum dikenal bot pemantau
+    Dipanggil oleh bio.py HANYA saat cache benar-benar kosong (None dari DB).
+    Lewat antrian _bio_worker — tidak bypass rate-limit.
 
     Alur:
       1. Bot utama deteksi pesan dari user X di grup A
       2. Query bio_profiles {chat_id: A, user_id: X} → None (belum ada)
       3. Bot utama panggil force_check_user(A, X)
-      4. MonitorInstance grup A fetch bio user X dari Telegram API
-      5. Simpan ke bio_profiles dengan expires_at = sekarang + 5 menit
+      4. MonitorInstance enqueue user X → _bio_worker fetch bio
+      5. Simpan ke bio_profiles dengan expires_at = sekarang + TTL + jitter
       6. Return has_link → bot utama hapus pesan jika True
 
     Return:
@@ -818,7 +969,7 @@ async def force_check_user(chat_id: int, user_id: int) -> bool | None:
 async def force_check_vc_join(chat_id: int, user_id: int) -> bool | None:
     """
     Paksa re-check bio user saat NAIK KE VOICE CHAT.
-    Cache khusus VC (VC_JOIN_RECHECK_SECS = 60 detik default).
+    Cache khusus VC (VC_JOIN_RECHECK_SECS = BIO_TTL_SECS default).
 
     Dipanggil dari video_call.py → saat user join VC.
     """
@@ -837,8 +988,8 @@ async def query_bio(chat_id: int, user_id: int) -> bool | None:
     Baca hasil cek bio dari DB untuk pasangan (chat_id, user_id).
     Data ini ditulis oleh MonitorInstance grup yang bersangkutan.
 
-    Karena data ber-TTL (5 menit), dokumen yang sudah expired otomatis
-    tidak ada di DB → return None → bot utama akan trigger force_check_user.
+    Karena data ber-TTL, dokumen yang sudah expired otomatis tidak ada
+    di DB → return None → bot utama akan trigger force_check_user.
 
     Return:
       True  → ada link di bio
