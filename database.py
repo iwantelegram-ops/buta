@@ -85,6 +85,7 @@ DEFAULT_CONFIG = {
     "bio_check":        False,
     "bio_vip_text":     "",   # teks VIP bio — user dengan teks ini di bio = VIP, bebas dari semua filter
     "anti_mention":     True,
+    "anti_link":        True,  # toggle link detector (URL/tautan aktif dalam pesan)
     "cas":              False,
     "local_spam_limit": 1,    # berapa pesan terakhir yg diingat untuk cek duplikat lokal (1-5)
     "anti_spam_ai":     False, # Nexus AI murni + auto regex aktif/nonaktif per grup (default OFF)
