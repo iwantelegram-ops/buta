@@ -1121,6 +1121,12 @@ async def page_newscore(chat_id: int):
     else:
         auto_title_line = "➖ <code>OFF</code>"
 
+    max_admins = cfg.get("max_admins", 1)
+    if max_admins == 0:
+        kuota_line = "   👑 Kuota Admin: <code>0 — hanya title member, tidak ada admin diangkat</code>"
+    else:
+        kuota_line = f"   👑 Kuota Admin: <code>Top {max_admins}</code> teratas"
+
     text = (
         f"🏆 <b>NEWSCORE — Skor Keaktifan & Admin Otomatis</b>\n"
         f"<code>Grup: {chat_id}</code>\n"
@@ -1129,7 +1135,7 @@ async def page_newscore(chat_id: int):
         f"⚙️ <b>Konfigurasi Reset:</b>\n"
         f"   📆 Mode: <code>{mode.upper()}</code>  ({mode_text})\n"
         f"   ⏰ Jam Reset: <code>{reset_time}</code>\n"
-        f"   👑 Kuota Admin: <code>Top {cfg.get('max_admins', 1)}</code> teratas\n"
+        f"{kuota_line}\n"
         f"{next_str}\n\n"
         f"🛡️ <b>Hak Akses Admin Baru:</b>\n{priv_lines}\n\n"
         f"📝 <b>Bio Admin Wajib:</b>  {bio_admin_line}\n"

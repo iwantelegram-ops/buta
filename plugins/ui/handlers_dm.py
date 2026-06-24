@@ -975,7 +975,7 @@ async def cb_ns_maxadmin(client, cb: CallbackQuery):
             return await _deny_change_info(cb, chat_id, "<b>Pengaturan NewsCore</b>")
         btns = [
             [InlineKeyboardButton(f"{i} Admin", callback_data=f"ns_setmax_{i}_{chat_id}")]
-            for i in [1, 2, 3]
+            for i in [0, 1, 2, 3]
         ]
         btns.append([InlineKeyboardButton("🔙  Kembali", callback_data=f"ns_panel_{chat_id}")])
         await safe_edit(cb.message, "👑 <b>Jumlah admin diangkat per periode:</b>", InlineKeyboardMarkup(btns))
