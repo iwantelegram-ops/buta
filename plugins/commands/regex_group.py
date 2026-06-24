@@ -1,4 +1,7 @@
 import asyncio
+import re
+import unicodedata
+
 """
 plugins/commands/regex_group.py
 ────────────────────────────────
@@ -19,12 +22,11 @@ FORMAT INPUT:
   Semantik | adalah AND (bukan OR) — sama seperti sistem owner spam Nexus.
 """
 
-import re
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 
 from database import db, is_admin, auto_delete_reply
-from core.regex_utils import build_group_interlock, generate_kandidat_mutasi_liar, pipeline_pembersihan
+from core.regex_utils import build_group_interlock
 
 # Alias untuk kompatibilitas file lain yang masih import nama lama
 _build_group_interlock = build_group_interlock
@@ -58,10 +60,11 @@ async def add_group_regex(client: Client, message):
         asyncio.create_task(auto_delete_reply([res, message], delay=DELAY_NOTIF))
         return
 
-    raw_input = " ".join(message.command[1:])
+    # Identik dengan owner: ambil teks setelah command, normalize NFKC dulu
+    raw_input = unicodedata.normalize("NFKC", message.text.split(None, 1)[1].strip())
 
     try:
-        pola, kata_list = build_group_interlock(raw_input)
+        pola, mutasi_display, _ = build_group_interlock(raw_input)
         re.compile(pola)
     except (ValueError, re.error) as e:
         res = await message.reply(
@@ -74,19 +77,12 @@ async def add_group_regex(client: Client, message):
         asyncio.create_task(auto_delete_reply([res, message], delay=DELAY_NOTIF))
         return
 
+    # mutasi_display dari build_group_interlock sudah identik dengan owner:
+    # list[tuple[str, list[str]]] → (kata_lowercase, mutasi_list)
+    # Tidak perlu re-generate manual — mutasi di sini SAMA dengan yang di pola
+    kata_list   = [k for k, _ in mutasi_display]
+    mutasi_map  = {k: m for k, m in mutasi_display}
     raw_display = " | ".join(kata_list) if kata_list else raw_input
-
-    mutasi_map: dict = {}
-    # Pisah kata asli dari raw_input agar kapital owner terjaga
-    kata_asli_list = [k.strip() for k in raw_input.split("|") if k.strip()]
-    for i, kata in enumerate(kata_list):
-        # Ambil versi asli (dengan kapital) jika tersedia
-        kata_dengan_kapital = kata_asli_list[i] if i < len(kata_asli_list) else kata
-        import re as _re4
-        kata_bersih = _re4.sub(r"\(?[×xX]\d+\)?", "", kata_dengan_kapital)
-        kata_bersih = _re4.sub(r"[^\w]", "", kata_bersih).strip()
-        if kata_bersih:
-            mutasi_map[kata] = generate_kandidat_mutasi_liar(kata_bersih)
 
     await group_regex_db.update_one(
         {"chat_id": cid, "pattern": pola},
@@ -137,16 +133,21 @@ async def del_group_regex(client: Client, message):
         asyncio.create_task(auto_delete_reply([res, message], delay=DELAY_NOTIF))
         return
 
-    raw_input = " ".join(message.command[1:])
+    # Identik dengan owner: normalize NFKC dulu
+    raw_input      = unicodedata.normalize("NFKC", message.text.split(None, 1)[1].strip())
+    mutasi_display = []
+    result         = None
 
     try:
-        pola, kata_list = build_group_interlock(raw_input)
+        pola, mutasi_display, _ = build_group_interlock(raw_input)
         result = await group_regex_db.delete_one({"chat_id": cid, "pattern": pola})
     except (ValueError, re.error):
-        result = None
+        pass
 
     if not result or not result.deleted_count:
-        raw_display = raw_input.strip()
+        # Fallback: cari by raw display (kata_list joined)
+        kata_list   = [k for k, _ in mutasi_display] if mutasi_display else []
+        raw_display = " | ".join(kata_list) if kata_list else raw_input.strip()
         result = await group_regex_db.delete_one({"chat_id": cid, "raw": raw_display})
 
     if result and result.deleted_count:
