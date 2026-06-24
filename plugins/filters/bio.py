@@ -279,6 +279,11 @@ async def bio_filter(client: Client, message: Message):
     if vip_text:
         is_vip = await _check_vip_bio(cid, uid, vip_text)
         if is_vip:
+            # User baru terdeteksi VIP lewat teks bio — daftarkan ke
+            # free_per_group (source="bio_vip") + buka mute jika ada.
+            # Lihat core/vip_bio_guard.py untuk detail alur lengkapnya.
+            from core.vip_bio_guard import maybe_enter_vip_bio
+            asyncio.create_task(maybe_enter_vip_bio(client, cid, uid))
             return  # User VIP → bebas dari seluruh pengecekan bio
 
     # ── Step 1: Cek data dari DB (data bot pemantau grup ini) ─────────────────
@@ -398,6 +403,10 @@ async def bio_typing_handler(client: Client, update, users, chats):
         if vip_text:
             is_vip = await _check_vip_bio(chat_id, user_id, vip_text)
             if is_vip:
+                # Sama seperti di bio_filter — daftarkan VIP bio + buka mute
+                # jika ada. Tidak masalah dipanggil berulang, sudah idempotent.
+                from core.vip_bio_guard import maybe_enter_vip_bio
+                asyncio.create_task(maybe_enter_vip_bio(client, chat_id, user_id))
                 return  # User VIP → tidak perlu trigger bot pemantau
 
         # Cek data di DB dulu — jika ada, tidak perlu trigger
