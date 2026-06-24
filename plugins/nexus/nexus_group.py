@@ -840,7 +840,7 @@ async def nexus_silent_filter(client: Client, message: Message):
         # FIXED: Tulis juga ke group_action_log agar muncul di panel "Log Aktivitas"
         asyncio.create_task(insert_group_action_log(
             cid, "HAPUS",
-            f"Nexus AI: {(kata_kunci.split(']', 1)[-1].strip() if ']' in kata_kunci else kata_kunci)[:80]}",
+            f"Nexus AI — {(kata_kunci.split(']', 1)[-1].strip() if ']' in kata_kunci else kata_kunci)[:80]}",
             uid, (message.from_user.first_name or str(uid))[:50],
             content[:100],
         ))
@@ -911,7 +911,7 @@ async def nexus_silent_filter(client: Client, message: Message):
     # FIXED: Tulis juga ke group_action_log agar muncul di panel "Log Aktivitas"
     asyncio.create_task(insert_group_action_log(
         cid, "HAPUS",
-        f"Nexus AI multi-pola ({len(matched)}): {_alasan_keroyok[:80]}",
+        f"Nexus AI Multi-Pola ({len(matched)} cocok) — {_alasan_keroyok[:80]}",
         uid, (message.from_user.first_name or str(uid))[:50],
         content[:100],
     ))
