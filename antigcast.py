@@ -522,46 +522,106 @@ async def _setup_commands():
 # ── Resolve Channel Peer ──────────────────────────────────────────────────────
 async def _resolve_channel_peer(client):
     """
-    Resolve CHANNEL_OWNER, LOG_CHANNEL, dan LOG_OS dari .env ke Telegram peer,
-    lalu simpan info CHANNEL_OWNER (title + username) ke database cloud.
+    Resolve CHANNEL_OWNER, LOG_CHANNEL, dan LOG_OS dari .env ke Telegram peer.
 
-    Tujuan:
-      • Sesi baru belum pernah "melihat" channel → PeerIdInvalid saat kirim log
-      • Resolve di sini memaksa Telegram mengembalikan access hash → masuk peer cache
-      • Username di DB memungkinkan resolve ulang via @username saat bot restart
+    Strategi resolve per channel (urutan prioritas):
+      1. Integer ID langsung — berhasil jika access hash sudah ada di session
+      2. Invite link dari DB  — berhasil di sesi baru tanpa access hash
+      3. Generate invite link baru via export_chat_invite_link() — butuh bot
+         sudah jadi admin dengan izin "Invite Users", lalu simpan ke DB
+
+    Invite link disimpan permanen di DB dan dipakai ulang setiap restart.
+    Hanya di-generate ulang jika channel_id di env berubah (db_key berisi
+    channel_id yang mana invite link itu milik — deteksi otomatis).
 
     Dipanggil sekali setelah app.start() di main().
     """
-    from database import save_bot_config
+    from database import save_bot_config, get_bot_config
 
-    # ── Resolve LOG_CHANNEL dan LOG_OS ────────────────────────────────────────────
-    # Cukup get_chat() — tujuannya hanya agar access hash masuk peer cache session.
-    for _env_key in ("LOG_CHANNEL", "LOG_OS"):
+    async def _resolve_one(env_key: str, ch_id: int) -> "object | None":
+        """
+        Resolve satu channel. Return Chat object jika berhasil, None jika gagal.
+        Side-effect: simpan/update invite link dan info channel ke DB.
+        """
+        db_key_link    = f"{env_key.lower()}_invite_link"
+        db_key_link_id = f"{env_key.lower()}_invite_link_for_id"  # channel_id pemilik link
+
+        # ── 1. Coba integer ID langsung ──────────────────────────────────────
+        try:
+            ch = await client.get_chat(ch_id)
+            print(f"[Startup] ✅ {env_key} ({ch_id}) di-resolve via integer ID.")
+            return ch
+        except Exception:
+            pass
+
+        # ── 2. Coba invite link dari DB ──────────────────────────────────────
+        saved_link    = await get_bot_config(db_key_link)
+        saved_link_id = await get_bot_config(db_key_link_id)
+
+        # Invalidasi link lama jika channel_id di env sudah berubah
+        if saved_link and saved_link_id and int(saved_link_id) != ch_id:
+            print(
+                f"[Startup] ℹ️  {env_key}: channel_id berubah "
+                f"({saved_link_id} → {ch_id}), invite link lama diabaikan."
+            )
+            saved_link = None
+
+        if saved_link:
+            try:
+                ch = await client.get_chat(saved_link)
+                print(f"[Startup] ✅ {env_key} ({ch_id}) di-resolve via invite link dari DB.")
+                return ch
+            except Exception as _e:
+                print(f"[Startup] ⚠️  {env_key}: invite link dari DB gagal ({_e}), coba generate baru.")
+
+        # ── 3. Generate invite link baru ─────────────────────────────────────
+        # Butuh bot sudah jadi admin dengan izin "Invite Users" di channel.
+        try:
+            link = await client.export_chat_invite_link(ch_id)
+            if link:
+                await save_bot_config(db_key_link,    link)
+                await save_bot_config(db_key_link_id, str(ch_id))
+                ch = await client.get_chat(link)
+                print(
+                    f"[Startup] ✅ {env_key} ({ch_id}) di-resolve via invite link baru "
+                    f"(disimpan ke DB)."
+                )
+                return ch
+        except Exception as _e2:
+            print(
+                f"[Startup] ⚠️  {env_key} ({ch_id}): semua metode resolve gagal. "
+                f"Pastikan bot admin dengan izin 'Invite Users'. Error: {_e2}"
+            )
+        return None
+
+    # ── Resolve ketiga channel ────────────────────────────────────────────────
+    for _env_key in ("LOG_CHANNEL", "LOG_OS", "CHANNEL_OWNER"):
         try:
             _ch_id = int(os.environ.get(_env_key, 0))
             if not _ch_id:
                 continue
-            await client.get_chat(_ch_id)
-            print(f"[Startup] ✅ {_env_key} ({_ch_id}) berhasil di-resolve ke peer cache.")
-        except Exception as _e:
-            print(f"[Startup] ⚠️  Gagal resolve {_env_key}: {_e}")
+            ch = await _resolve_one(_env_key, _ch_id)
+            if ch is None:
+                continue
 
-    # ── Resolve CHANNEL_OWNER + simpan title/username ke DB ────────────────────
-    ch_id = int(os.environ.get("CHANNEL_OWNER", 0))
-    if not ch_id:
-        return
-    try:
-        ch = await client.get_chat(ch_id)
-        title    = ch.title or ""
-        username = getattr(ch, "username", None) or ""
-        await save_bot_config("channel_owner_id",       ch_id)
-        await save_bot_config("channel_owner_title",    title)
-        await save_bot_config("channel_owner_username", username)
-        label = f"@{username}" if username else f"(no username, id={ch_id})"
-        print(f"[Startup] ✅ CHANNEL_OWNER '{title}' {label} berhasil di-cache ke DB.")
-    except Exception as e:
-        print(f"[Startup] ⚠️  Gagal resolve CHANNEL_OWNER ({ch_id}): {e}")
-        print(f"           Info channel akan diambil dari cache DB (jika sudah pernah disimpan sebelumnya).")
+            # Simpan info channel ke DB (dipakai rewarm & tampilan /start)
+            _title    = getattr(ch, "title", "") or ""
+            _username = getattr(ch, "username", None) or ""
+            await save_bot_config(f"{_env_key.lower()}_id",    _ch_id)
+            await save_bot_config(f"{_env_key.lower()}_title",  _title)
+            if _username:
+                await save_bot_config(f"{_env_key.lower()}_username", _username)
+
+            # Kompatibilitas mundur: CHANNEL_OWNER masih simpan key lama juga
+            if _env_key == "CHANNEL_OWNER":
+                await save_bot_config("channel_owner_id",       _ch_id)
+                await save_bot_config("channel_owner_title",    _title)
+                await save_bot_config("channel_owner_username", _username)
+                label = f"@{_username}" if _username else f"(no username, id={_ch_id})"
+                print(f"[Startup] ✅ CHANNEL_OWNER '{_title}' {label} berhasil di-cache ke DB.")
+
+        except Exception as _outer_e:
+            print(f"[Startup] ⚠️  {_env_key}: error tak terduga: {_outer_e}")
 
 
 # ── Graceful Shutdown ─────────────────────────────────────────────────────────
