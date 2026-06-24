@@ -309,15 +309,25 @@ async def _deploy_signal_new() -> None:
 async def _deploy_watch_and_release() -> None:
     """
     Instance LAMA: poll MongoDB setiap 2 detik. Jika ada flag 'pending' dari
-    deploy baru (bukan dari diri sendiri), lakukan graceful_shutdown() lalu
-    tulis flag 'released' agar instance baru bisa lanjut.
+    deploy baru (bukan dari diri sendiri), HANYA update session ke MongoDB
+    lalu tulis flag 'released' agar instance baru bisa lanjut start.
+    Instance lama TIDAK shutdown — Railway yang akan kill prosesnya via SIGTERM.
     Berjalan sebagai background task sejak awal.
+
+    Kenapa tidak shutdown di sini:
+      Jika instance lama langsung shutdown + loop.stop() saat flag 'pending'
+      terdeteksi, ada race condition — flag 'released' sudah ditulis tapi
+      _save_session_to_mongo() belum tentu selesai saat instance baru sudah
+      ambil alih koneksi Telegram. Session jadi tidak tersimpan sempurna.
+      Dengan membiarkan instance lama tetap jalan, Railway yang kill pada
+      waktunya via SIGTERM — dan saat itu graceful_shutdown() via SIGTERM
+      handler yang menangani save session dengan benar.
     """
     if get_active_backend() != "mongo":
         return
 
     import json
-    print(f"[Deploy] 👀 Deploy watcher aktif (deploy_id={_DEPLOY_ID}).")
+    print(f"[Deploy] 👀 Deploy watcher aktif (pid={_DEPLOY_ID}).")
     while True:
         await asyncio.sleep(2)
         try:
@@ -330,11 +340,17 @@ async def _deploy_watch_and_release() -> None:
 
         # Ada permintaan deploy baru, bukan dari diri sendiri
         if data.get("state") == "pending" and data.get("by") != _DEPLOY_ID:
-            print(f"[Deploy] 🔄 Deploy baru terdeteksi. Instance lama mulai shutdown...")
-            globals()["_shutdown_triggered"] = True
+            print(f"[Deploy] 🔄 Deploy baru terdeteksi. Update session ke MongoDB (tanpa shutdown)...")
 
-            # Simpan flag 'released' SEBELUM shutdown penuh agar instance baru
-            # tidak menunggu sampai timeout 30 detik
+            # Save session dulu — pastikan peer cache terbaru tersimpan
+            try:
+                await _save_session_to_mongo()
+                from monitor_bot_reference import save_all_sessions
+                await save_all_sessions()
+            except Exception as e:
+                print(f"[Deploy] ⚠️  Gagal update session sebelum release: {e}")
+
+            # Tulis flag 'released' agar instance baru tidak menunggu timeout 30 detik
             import time
             released = json.dumps({"state": "released", "by": _DEPLOY_ID, "ts": time.time()})
             try:
@@ -342,10 +358,10 @@ async def _deploy_watch_and_release() -> None:
             except Exception:
                 pass
 
-            await graceful_shutdown()
-            # Hentikan event loop — instance ini selesai
-            asyncio.get_event_loop().stop()
-            return
+            print(f"[Deploy] ✅ Session sudah diupdate & flag 'released' ditulis. "
+                  f"Instance lama TETAP berjalan hingga Railway kill via SIGTERM.")
+            # Tidak shutdown, tidak stop loop — lanjut polling seperti biasa
+            continue
 
 
 async def _deploy_mark_active() -> None:
@@ -556,6 +572,19 @@ async def _resolve_channel_peer(client):
             ch = await client.get_chat(ch_id)
             print(f"[Startup] ✅ {env_key} ({ch_id}) di-resolve via integer ID.")
             return ch
+        except Exception:
+            pass
+
+        # ── 1b. Coba @username dari DB ───────────────────────────────────────
+        # Sesi baru setelah redeploy sering gagal resolve integer ID channel
+        # karena access hash belum ada. @username tidak butuh access hash,
+        # jadi ini jalur paling andal untuk LOG_CHANNEL dan LOG_OS.
+        try:
+            _saved_uname = await get_bot_config(f"{env_key.lower()}_username")
+            if _saved_uname:
+                ch = await client.get_chat(f"@{_saved_uname.lstrip('@')}")
+                print(f"[Startup] ✅ {env_key} ({ch_id}) di-resolve via @username dari DB.")
+                return ch
         except Exception:
             pass
 
