@@ -1569,6 +1569,24 @@ async def delete_worker(client) -> None:
 
     pending: dict[int, list[int]] = {}
 
+    # Maksimal antrian hapus per grup. Jika sudah penuh saat spam baru masuk,
+    # pesan LAMA yang di-drop (bukan yang baru) — efek luber: yang tersisa
+    # selalu 10 pesan terbaru. Pesan lama yang di-drop dibiarkan di grup
+    # (tidak dihapus), karena jika spam sudah ramai, yang penting hapus yang
+    # terbaru agar timeline bersih ke depannya.
+    _MAX_PENDING_PER_GROUP = 10
+
+    def _add_to_pending(cid: int, mids: list[int]) -> None:
+        bucket = pending.setdefault(cid, [])
+        bucket.extend(mids)
+        if len(bucket) > _MAX_PENDING_PER_GROUP:
+            dropped = len(bucket) - _MAX_PENDING_PER_GROUP
+            del bucket[:dropped]   # buang yang paling lama
+            print(
+                f"[delete_worker] chat={cid}: antrian penuh, "
+                f"{dropped} pesan lama di-drop (sisakan {_MAX_PENDING_PER_GROUP} terbaru)"
+            )
+
     async def flush():
         if not getattr(client, "is_connected", False):
             return
@@ -1614,14 +1632,14 @@ async def delete_worker(client) -> None:
             # Tunggu item pertama — timeout panjang saat tidak ada pending
             wait_time = _BATCH_WINDOW if not pending else _IDLE_TIMEOUT
             cid, mids = await asyncio.wait_for(delete_queue.get(), timeout=wait_time)
-            pending.setdefault(cid, []).extend(mids)
+            _add_to_pending(cid, mids)
             delete_queue.task_done()
 
             # Kuras semua yang sudah ada di queue saat ini (non-blocking)
             while not delete_queue.empty():
                 try:
                     cid2, mids2 = delete_queue.get_nowait()
-                    pending.setdefault(cid2, []).extend(mids2)
+                    _add_to_pending(cid2, mids2)
                     delete_queue.task_done()
                 except asyncio.QueueEmpty:
                     break
@@ -1634,7 +1652,7 @@ async def delete_worker(client) -> None:
             while not delete_queue.empty():
                 try:
                     cid3, mids3 = delete_queue.get_nowait()
-                    pending.setdefault(cid3, []).extend(mids3)
+                    _add_to_pending(cid3, mids3)
                     delete_queue.task_done()
                 except asyncio.QueueEmpty:
                     break
