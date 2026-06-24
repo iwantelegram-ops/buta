@@ -50,6 +50,8 @@ from database import (
     db,
     is_message_handled,
     get_config,
+    check_bot_permissions,
+    is_admin,
 )
 
 _free_col   = db["free_per_group"]
@@ -632,6 +634,15 @@ async def nexus_silent_filter(client: Client, message: Message):
 
     # ── PINTU BERURUTAN: Cek apakah filter sebelumnya sudah menangani ─────────
     if is_message_handled(cid, mid):
+        return
+
+    # ── Cek izin bot: HARUS punya delete_messages DAN restrict_members ───────
+    # Jika salah satu tidak ada → skip grup ini sepenuhnya (tidak inspect
+    # sama sekali — tidak ada query VIP/config/regex/AI di bawah ini).
+    if not await check_bot_permissions(client, cid):
+        return
+
+    if await is_admin(client, cid, uid):
         return
 
     # VIP: bebas dari seluruh filter Nexus AI
