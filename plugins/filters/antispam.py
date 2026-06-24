@@ -141,26 +141,22 @@ async def _is_external_mention(client: Client, message) -> bool:
         target_uid: int | None = None
         target_uname: str | None = None
 
+        # Hanya proses @username mention biasa.
+        # TEXT_MENTION (tag tanpa @username) di-skip karena hanya bisa
+        # dilakukan ke member aktif — Telegram tidak mengizinkan tag jenis
+        # ini ke non-member, sehingga pasti bukan external.
+        # tg://user?id= juga di-skip karena alasan yang sama.
         if entity.type == MessageEntityType.MENTION:
             uname = content[entity.offset:entity.offset + entity.length].lstrip("@").lower()
             target = uname
             target_uname = uname
-        elif entity.type == MessageEntityType.TEXT_MENTION and getattr(entity, "user", None):
-            target = entity.user.id
-            target_uid = entity.user.id
-        elif entity.type in (MessageEntityType.URL, MessageEntityType.TEXT_LINK):
-            url = (content[entity.offset:entity.offset + entity.length]
-                   if entity.type == MessageEntityType.URL else entity.url)
-            if url.startswith("tg://user?id="):
-                try:
-                    target = int(url.split("=")[1])
-                    target_uid = target
-                except Exception:
-                    pass
+        else:
+            continue
 
         if not target:
             continue
-        if isinstance(target, str) and target in ("botfather", "telegram"):
+        # Skip username sistem Telegram yang pasti bukan non-member
+        if target in ("botfather", "telegram", "admin"):
             continue
 
         # ── 1. Cek cache dulu ───────────────────────────────────────────────
