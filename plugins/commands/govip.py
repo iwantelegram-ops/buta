@@ -46,7 +46,7 @@ FLOW DI DM (deep-link ?start=govip_<chat_id>):
 import time
 from html import escape as _html_escape
 
-from pyrogram import Client, ContinuePropagation, filters
+from pyrogram import Client, ContinuePropagation, StopPropagation, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 
@@ -158,6 +158,13 @@ async def govip_start_intercept(client: Client, message: Message):
         # perilaku /start lama 100% tidak berubah.
         raise ContinuePropagation
 
+    # Mulai dari sini pesan SUDAH PASTI payload govip — apapun hasilnya,
+    # update ini TIDAK BOLEH diteruskan lagi ke handler /start umum
+    # (group=0 di antigcast_group.py), supaya balasan start tidak terkirim
+    # dua kali. Setiap jalur keluar di bawah memakai StopPropagation
+    # eksplisit setelah selesai membalas, bukan `return` biasa — `return`
+    # polos pada group=-1 TIDAK menghentikan Pyrogram meneruskan update
+    # ke group lain yang juga match.
     uid = message.from_user.id if message.from_user else None
 
     # ── Cooldown DM sendiri untuk payload govip — anti-spam buka link ──────
@@ -165,13 +172,10 @@ async def govip_start_intercept(client: Client, message: Message):
     if uid is not None:
         last = _govip_dm_cooldown.get(uid, 0.0)
         if now - last < _GOVIP_DM_CD_SECS:
-            return   # masih cooldown → abaikan diam-diam, tidak kirim apapun
+            raise StopPropagation   # masih cooldown → diam, tetap stop di sini
         _govip_dm_cooldown[uid] = now
 
     # ── 1. Balasan /start BIASA dikirim LEBIH DULU ──────────────────────────
-    # Dipanggil langsung (bukan via ContinuePropagation) supaya urutan kirim
-    # terjamin: start dulu, govip menyusul di bawahnya — tanpa risiko
-    # balasan start terkirim dua kali.
     try:
         from plugins.ui.pages import page_start
         start_text, start_keyboard = await page_start(client)
@@ -196,7 +200,7 @@ async def govip_start_intercept(client: Client, message: Message):
             "jangan kirim link secara manual.",
             parse_mode=ParseMode.HTML,
         )
-        return
+        raise StopPropagation
 
     cfg = await get_config(cid)
     if not _vip_bio_active(cfg):
@@ -209,7 +213,7 @@ async def govip_start_intercept(client: Client, message: Message):
             "bionya sudah dihapus. Coba lagi nanti, atau hubungi admin grup.",
             parse_mode=ParseMode.HTML,
         )
-        return
+        raise StopPropagation
 
     vip_text = _html_escape((cfg.get("bio_vip_text") or "").strip())
 
@@ -263,3 +267,4 @@ async def govip_start_intercept(client: Client, message: Message):
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+    raise StopPropagation
