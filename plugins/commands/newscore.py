@@ -298,6 +298,47 @@ async def _ns_do_reset_impl(client, chat_id: int):
 
         # Flush buffer sebelum ambil leaderboard → skor terbaru masuk DB
         await ns_flush_score_buffer()
+
+        # ── MODE TITLE-ONLY (max_admins == 0) ────────────────────────────────
+        # Tidak ada admin yang diangkat atau dicopot.
+        # Hanya jalankan Auto Title Member (jika aktif) lalu reset skor.
+        if max_admins == 0:
+            # Ambil daftar NS admin lama — mereka tetap admin, tidak disentuh
+            old_admins    = await ns_get_current_admins(chat_id)
+            old_admin_ids = {a["user_id"] for a in old_admins}
+
+            ann = (
+                "📢 <b>RESET NEWSCORE — MODE TITLE MEMBER</b> 📢\n\n"
+                "ℹ️ Kuota admin diset ke <code>0</code> — tidak ada admin diangkat periode ini.\n"
+                "Hanya penilaian title member yang berjalan.\n"
+            )
+
+            # Auto Title Member tetap berjalan penuh
+            # Exclude NS admin lama agar tidak dicoba di-tag (Telegram tolak tag ke admin)
+            auto_title_summary = await _apply_auto_title_member(
+                client, chat_id, cfg, old_admin_ids, base_delay=0.0
+            )
+            ann += auto_title_summary
+
+            # Hitung next_reset
+            cfg_fresh = await ns_get_config(chat_id)
+            new_next  = ns_calc_next_reset(cfg_fresh)
+            await ns_update(chat_id, {"next_reset": new_next})
+
+            ann += (
+                f"\n\n🔄 <i>Poin direset ke 0!</i>\n"
+                f"📅 Reset berikutnya: <code>{datetime.fromisoformat(new_next).strftime('%d %b %Y %H:%M')}</code> WIB"
+            )
+
+            try:
+                await client.send_message(chat_id=chat_id, text=ann, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                print(f"[NewsCore] send announcement error: {e}")
+
+            await ns_reset_scores(chat_id)
+            return
+
+        # ── MODE NORMAL (max_admins > 0) ──────────────────────────────────────
         top = await ns_get_leaderboard(chat_id, max_admins)
 
         # Ambil daftar admin NS lama (sebelum periode ini)
