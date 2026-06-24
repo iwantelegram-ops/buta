@@ -435,10 +435,11 @@ async def _log_bio_deletion(client: Client, message: Message):
     if not LOG_CHANNEL:
         return
 
+    from plugins.commands.log import _user_line, _fmt_waktu
+
     uid          = message.from_user.id
     cid          = message.chat.id
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
-    waktu        = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
+    user_mention = _user_line(uid, message.from_user.first_name)
     content      = (message.text or message.caption or "").strip()
 
     # Ambil bio dari DB (data khusus grup ini)
@@ -449,14 +450,16 @@ async def _log_bio_deletion(client: Client, message: Message):
         bio_snippet = "(tidak diketahui)"
 
     log_text = (
-        "<b>❖ BIO LINK DETECTOR ❖</b>\n"
-        "🔍 <b>Pesan Dihapus — Tautan di Bio</b>\n"
+        "<b>❖ HAPUS OTOMATIS — BIO LINK DETECTOR ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"🔍 <b>Tipe:</b> Bio Link Detector\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
-        f"◈ <b>Bio:</b> <code>{bio_snippet}</code>\n\n"
-        f"<b>Konten pesan:</b> <code>{content[:400]}</code>"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
+        f"◈ <b>Keterangan:</b> Profil bio user mengandung tautan/link\n"
+        f"◈ <b>Kebijakan:</b> Pesan dari user berbio link dihapus otomatis\n"
+        f"◈ <b>Bio terdeteksi:</b> <code>{bio_snippet}</code>\n\n"
+        f"📨 <b>Konten pesan:</b>\n<code>{content[:400]}</code>"
         "</blockquote>"
     )
     try:

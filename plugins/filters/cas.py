@@ -218,54 +218,54 @@ async def _log_cas_ban(client: Client, message: Message, waktu: str):
     if not LOG_CHANNEL:
         return
 
+    from plugins.commands.log import _send_log, _user_line
+
     uid          = message.from_user.id
     cid          = message.chat.id
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
+    user_mention = _user_line(uid, message.from_user.first_name)
     content      = (message.text or message.caption or "—").strip()
 
     log_text = (
-        "<b>❖ CAS ANTI-SPAM ❖</b>\n"
-        "🚫 <b>User Di-Ban — Spammer Global Terverifikasi</b>\n"
-        "<blockquote expandable>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        "<b>❖ BAN OTOMATIS — CAS SPAMMER TERVERIFIKASI ❖</b>\n"
+        "<blockquote>"
+        f"🚫 <b>Tipe:</b> Ban Permanen CAS Anti-Spam\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
         f"◈ <b>Waktu:</b> {waktu}\n"
-        "◈ <b>Sumber:</b> Database CAS (cas.chat)\n"
-        "◈ <b>Aksi:</b> Ban permanen + hapus pesan\n\n"
-        f"<b>Konten:</b> <code>{content[:500]}</code>"
+        f"◈ <b>Sumber verifikasi:</b> Database CAS (cas.chat)\n"
+        f"◈ <b>Keterangan:</b> User terdaftar sebagai spammer global terverifikasi\n"
+        f"◈ <b>Aksi:</b> Ban permanen + pesan dihapus\n\n"
+        f"📨 <b>Konten saat terdeteksi:</b>\n<code>{content[:500]}</code>"
         "</blockquote>"
     )
-    from plugins.commands.log import _send_log
     await _send_log(client, log_text)
 
 
 async def _log_cas_ban_failed(client: Client, message: Message):
     """
-    Peringatkan owner via LOG_CHANNEL saat eksekusi ban CAS gagal — biasanya
-    karena bot bukan admin / kehilangan izin ban di grup ini. Pesan spam
-    tetap dihapus, tapi user TIDAK benar-benar ter-ban.
+    Peringatkan owner via LOG_CHANNEL saat eksekusi ban CAS gagal.
     """
     if not LOG_CHANNEL:
         return
 
+    from plugins.commands.log import _send_log, _user_line, _fmt_waktu
+
     uid          = message.from_user.id
     cid          = message.chat.id
-    user_mention = f"<a href='tg://user?id={uid}'>{message.from_user.first_name}</a>"
-    waktu        = datetime.now(TZ_WIB).strftime("%d/%m/%Y %H:%M:%S WIB")
+    user_mention = _user_line(uid, message.from_user.first_name)
 
     log_text = (
-        "<b>❖ CAS ANTI-SPAM — BAN GAGAL ❖</b>\n"
-        "⚠️ <b>Bot Tidak Bisa Ban User</b>\n"
+        "<b>❖ BAN GAGAL — IZIN BOT TIDAK CUKUP ❖</b>\n"
         "<blockquote>"
-        f"◈ <b>User:</b> {user_mention} (<code>{uid}</code>)\n"
+        f"⚠️ <b>Tipe:</b> CAS Ban Gagal Dieksekusi\n"
+        f"◈ <b>User:</b> {user_mention}\n"
         f"◈ <b>Grup:</b> {message.chat.title} (<code>{cid}</code>)\n"
-        f"◈ <b>Waktu:</b> {waktu}\n"
-        f"◈ <b>Kemungkinan Sebab:</b> Bot bukan admin / tidak punya izin "
-        f"ban member di grup ini.\n\n"
-        f"<i>Pesan sudah dihapus, namun user TIDAK ter-ban — silakan cek izin admin bot.</i>"
+        f"◈ <b>Waktu:</b> {_fmt_waktu()}\n"
+        f"◈ <b>Keterangan:</b> User terdeteksi spammer CAS, namun ban tidak berhasil\n"
+        f"◈ <b>Sebab gagal:</b> Bot bukan admin / tidak punya izin ban member\n"
+        f"<i>Pesan sudah dihapus, namun user TIDAK ter-ban — cek izin admin bot.</i>"
         "</blockquote>"
     )
-    from plugins.commands.log import _send_log
     await _send_log(client, log_text)
 
 

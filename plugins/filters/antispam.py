@@ -285,7 +285,7 @@ async def _gcast_punish_other_group(
         try:
             await insert_group_action_log(
                 chat_id, "MUTE",
-                f"Mute {duration_min} menit – anti-gcast global 10× berturut-turut",
+                f"Mute {duration_min} mnt — Anti-Broadcast Gcast Global 10×",
                 user_id, str(user_id), konten,
             )
         except Exception:
