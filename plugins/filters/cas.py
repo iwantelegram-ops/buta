@@ -275,8 +275,7 @@ async def handle_bot_join(client: Client, message: Message):
     if not message.new_chat_members:
         return
     for member in message.new_chat_members:
-        if member.id == client.me.id:
-       #if member.id == (await client.get_me()).id:
+        if member.id == client.me.id: #(await client.get_me()).id:
             await update_config(message.chat.id, "local", True)
             try:
                 chat = await client.get_chat(message.chat.id)
@@ -304,7 +303,7 @@ async def handle_bot_join(client: Client, message: Message):
 @Client.on_chat_member_updated()
 async def handle_bot_status_change(client: Client, update):
     try:
-        me = await client.get_me()
+        me = client.me #await client.get_me()
         if not update.new_chat_member or update.new_chat_member.user.id != me.id:
             return
 
