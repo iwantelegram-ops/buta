@@ -296,7 +296,7 @@ async def _process_detection(client: "Client", message: "Message") -> None:
             return
 
     # ── 3.5 Link detector ─────────────────────────────────────────────────
-    if _has_url_entity(message):
+    if cfg.get("anti_link", True) and _has_url_entity(message):
         mark_message_handled(cid, mid)
         await delete_queue.put((cid, [mid]))
         asyncio.create_task(insert_group_action_log(
